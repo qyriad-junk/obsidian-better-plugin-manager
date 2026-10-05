@@ -17,7 +17,8 @@
     "@typescript-eslint/parser": "5.29.0",
     "esbuild": "0.17.3",
     "obsidian": "latest",
+    "playwright-core": "^1.63.0",
     "tslib": "2.4.0",
-    "typescript": "4.7.4" 
+    "typescript": "4.7.4"
   }
 }

@@ -28,7 +28,11 @@ See also [refactor-plan.md](refactor-plan.md) for the proposed untangling order.
 | Other tooling | `spexcode.json` + `.spec/` are artifacts of upstream's "SpexCode" spec-graph tool (business-domain spec nodes, each linked to source files). `.agent/references/obsidian-sample-plugin-plus` is a git submodule of general Obsidian plugin-dev guidance (run `git submodule update --init`). |
 | Upstream sync | As of 2026-10-05 the fork's `main` == upstream `main` (`e56155f`). Upstream also has an unmerged `feat/i18n-integration` branch. `git ls-remote https://github.com/eondrcode/obsidian-manager` works from the cloud container. |
 
-There is no way to run Obsidian in the container, so behavioral claims marked *(runtime-unverified)* need checking in a real vault.
+**A real Obsidian can be run headlessly** in the container (or any Linux box): see
+[`scripts/sandbox/README.md`](../scripts/sandbox/README.md). It downloads the Linux build, runs it under Xvfb with an
+isolated config and test vault, and drives it over CDP (`eval`, `screenshot`, `reload`, fake-plugin generator).
+Behavioral claims marked *(runtime-unverified)* predate it. GitHub install/update flows still can't be exercised there
+(`api.github.com` is out of reach), and mobile code paths never run.
 
 ---
 
@@ -275,7 +279,7 @@ Dynamic (opt-in): per-plugin toggle `manager-<id>`, per-group `manager-<gid>-ena
 ## Known issues
 
 Ranked roughly by user impact. [C] = confirmed by reading code (and Obsidian source where relevant).
-[L] = very likely from code + Obsidian source, but *(runtime-unverified)*.
+[L] = very likely from code + Obsidian source, but *(runtime-unverified)*. [R] = reproduced in the sandbox.
 
 ### Fixed on `fix/trivial-bugs` (2026-10-05)
 Confirm dialogs' raw-key title and "OK" label · NoteTip title always Chinese, panel not dismissable · Ctrl+F listener
@@ -286,7 +290,7 @@ folders · protocol handler crash without `enable` · self-check takeover silent
 sessions · three non-semver version comparators (now `src/version.ts`).
 
 ### Correctness (open)
-1. [L] **Brand-new GitHub installs aren't actually enabled.** `installPluginFromGithub` calls `enablePluginAndSave` *before*
+1. [C][R] **Brand-new GitHub installs aren't actually enabled.** `installPluginFromGithub` calls `enablePluginAndSave` *before*
    `loadManifests()`; for a new plugin `manifests[id]` is absent, so Obsidian's `enablePlugin` returns `false`, but BPM's
    record is set to `enabled: true`.
 2. [C] **Installing/updating force-enables plugins.** Every install/update ends in `enablePluginAndSave` + `enabled = true`,
@@ -296,8 +300,10 @@ sessions · three non-semver version comparators (now `src/version.ts`).
    config import writes `data.json` under a *running* plugin (which may overwrite it on its next `saveData`), and
    `applyEnabledState` uses `*AndSave`. `applyWorkspaceSettings` flips `DELAY` without running the delay on/off transition.
 5. [C] Delay timers start during community-plugin init, before vault/layout load (see *Delay-start mechanics*).
-6. [C] Hidden ribbon icons of delay-loaded plugins reappear (native `leftRibbon.load` behaviour, see internals); BPM's
-   own ribbon manager matches by aria-label text and doesn't address it.
+6. [C][R] Hidden ribbon icons of delay-loaded plugins reappear (native `leftRibbon.load` behaviour, see internals); BPM's
+   own ribbon manager matches by aria-label text and doesn't address it. Reproduced with two fake plugins (one native,
+   one BPM-delayed); re-applying the pre-startup `hiddenItems` snapshot via `leftRibbon.load()` after the delayed load
+   was confirmed to hide the icon again and persist `hidden: true`.
 7. [C] Entering edit mode re-renders the whole plugin page (`renderContent()` → `pageEl.empty()`), losing scroll; edit-mode
    cards have no enable toggle; the context menu has no enable/disable or delay actions.
 
