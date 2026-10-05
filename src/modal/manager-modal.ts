@@ -2129,6 +2129,11 @@ export class ManagerModal extends Modal {
         this.manager = manager;
         this.settings = manager.settings;
         this.basePath = normalizePath(`${this.app.vault.configDir}`);
+        // [功能] Mod+F 聚焦搜索框。注册在 modal 自己的 scope 上，只在弹窗打开时生效。
+        this.scope.register(["Mod"], "f", () => {
+            this.searchEl?.inputEl?.focus();
+            return false;
+        });
         // 首次启动运行下 避免有新加入的插件
         manager.synchronizePlugins(
             Object.values(this.appPlugins.manifests).filter(
@@ -7936,17 +7941,10 @@ export class ManagerModal extends Modal {
         await this.showData();
         this.searchEl.inputEl.focus();
         this.applyEditingStyle();
-        // [功能] ctrl+f聚焦
-        activeDocument.addEventListener("keydown", (event) => {
-            if (event.ctrlKey && event.key.toLowerCase() === "f") {
-                if (this.searchEl.inputEl) {
-                    this.searchEl.inputEl.focus();
-                }
-            }
-        });
     }
 
     public onClose() {
+        if (this.manager.managerModal === this) this.manager.managerModal = null;
         this.clearScheduledSearchWork();
         if (this.settings.PERSISTENCE && this.settings.FILTER_SEARCH !== this.searchText) {
             this.settings.FILTER_SEARCH = this.searchText;
