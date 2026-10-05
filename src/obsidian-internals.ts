@@ -33,6 +33,8 @@ export type ObsidianPluginRegistry = {
     disablePlugin: (id: string) => Promise<void>;
     enablePluginAndSave: (id: string) => Promise<void>;
     disablePluginAndSave: (id: string) => Promise<void>;
+    /** Writes `Array.from(enabledPlugins)` to community-plugins.json. */
+    saveConfig?: () => Promise<void>;
 };
 
 export type SettingTabLike = {

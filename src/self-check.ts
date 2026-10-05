@@ -65,8 +65,22 @@ async function writeCommunityPlugins(
     try {
         const nextPlugins = uniq(plugins);
         const current = currentPlugins ?? await readCommunityPlugins(manager);
-        if (samePluginList(current, nextPlugins)) return true;
 
+        // Obsidian never re-reads community-plugins.json at runtime: it keeps the list in
+        // app.plugins.enabledPlugins and writes that set back on every enable/disablePluginAndSave.
+        // Writing only the file would be silently undone by the next such call, so update the
+        // in-memory set and let Obsidian persist it.
+        const registry = manager.appPlugins;
+        if (registry?.enabledPlugins instanceof Set && typeof registry.saveConfig === 'function') {
+            const inMemory = Array.from(registry.enabledPlugins);
+            if (samePluginList(current, nextPlugins) && samePluginList(inMemory, nextPlugins)) return true;
+            registry.enabledPlugins.clear();
+            nextPlugins.forEach((id) => registry.enabledPlugins.add(id));
+            await registry.saveConfig();
+            return true;
+        }
+
+        if (samePluginList(current, nextPlugins)) return true;
         const adapter = manager.app.vault.adapter;
         await adapter.write(getCommunityPluginsPath(manager), JSON.stringify(nextPlugins, null, 2));
         return true;
