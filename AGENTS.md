@@ -13,3 +13,8 @@
 
 需要查阅时，读取对应目录下的 `AGENTS.md` 和 `.agent/skills/` 中的 skill 文件。
 
+## Codebase notes
+
+Read `docs/codebase-notes.md` before working on this code: repo map, the two enable-state models (normal vs. delay mode),
+verified Obsidian `app.plugins` internals, feature walkthroughs, and a ranked list of known issues.
+

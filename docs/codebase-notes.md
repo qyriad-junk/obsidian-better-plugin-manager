@@ -1,0 +1,328 @@
+# BPM codebase notes
+
+Working notes on the fork of [eondrcode/obsidian-manager](https://github.com/eondrcode/obsidian-manager)
+("Better Plugins Manager", plugin id `better-plugins-manager`).
+Written 2026-10-05 after a full read of the source, so that nobody has to re-derive any of this.
+Upstream's own guides (`AGENTS.md`, `.spec/**/spec.md`) are in Chinese and are accurate *maps*,
+but they describe intent; several of their guarantees are contradicted by the code (see [Known issues](#known-issues)).
+
+Claims about Obsidian's internals below were checked against Obsidian **1.13.7**'s `app.js`
+(see [Verifying Obsidian internals](#verifying-obsidian-internals)), not recalled from memory.
+
+---
+
+## Build, tooling, state of the repo
+
+| | |
+|---|---|
+| Install / build | `npm ci && npm run build` (= `tsc -noEmit -skipLibCheck && node esbuild.config.mjs production`) → `main.js` (~1.5 MB, gitignored). `npm run dev` = esbuild watch. |
+| Pinned toolchain | TypeScript 4.7.4, esbuild 0.17.3, `obsidian` types resolve to **1.4.11** via the lockfile even though `package.json` says `"latest"`. `manifest.json` `minAppVersion` is 1.5.8. |
+| tsconfig | `noImplicitAny` + `strictNullChecks`, **not** full `strict`. `paths` maps `main` → `src/main` and `src/*`, so imports appear as `"main"`, `"src/…"` and relative paths interchangeably. |
+| Entry | Root `main.ts` is a one-line re-export of `src/main.ts` (esbuild entry is the root file). |
+| Tests | **None.** No test runner, no fixtures. |
+| Lint | `.eslintrc` exists (old eslintrc format) but ESLint isn't a devDependency and there is no lint script. Running the community-store bot's ruleset (`eslint-plugin-obsidianmd` recommended + its overrides, as configured in `.agent/references/obsidian-sample-plugin-plus/eslint.config.mjs`) gives a baseline of **198 errors**: mostly `require-await` (35), `no-console` (32+32), unsafe-any (~60), `hardcoded-config-path` (21, all inside locale *strings*, false-positive-ish), `no-misused-promises` (5), `ui/sentence-case` (5). |
+| CI | `.github/workflows/release.yml` only: on tag push, build and create a **draft** GitHub release with `main.js manifest.json styles.css`. No PR CI. |
+| Release | `npm version <x>` runs `version-bump.mjs`, which syncs `manifest.json`, `versions.json`, `package-lock.json`. `.npmrc` sets `tag-version-prefix=""`. |
+| Other tooling | `spexcode.json` + `.spec/` are artifacts of upstream's "SpexCode" spec-graph tool (business-domain spec nodes, each linked to source files). `.agent/references/obsidian-sample-plugin-plus` is a git submodule of general Obsidian plugin-dev guidance (run `git submodule update --init`). |
+| Upstream sync | As of 2026-10-05 the fork's `main` == upstream `main` (`e56155f`). Upstream also has an unmerged `feat/i18n-integration` branch. `git ls-remote https://github.com/eondrcode/obsidian-manager` works from the cloud container. |
+
+There is no way to run Obsidian in the container, so behavioral claims marked *(runtime-unverified)* need checking in a real vault.
+
+---
+
+## Repo map
+
+Lines of code in parentheses. Real logic is ~13k lines; the rest is CSS (14k) and locales (~6k).
+
+```
+main.ts                         re-export of src/main.ts
+src/main.ts                (1660) Manager extends Plugin. Lifecycle, settings load/save, delay-start engine,
+                                  update checks, beta-source maintenance, ribbon styling runtime, GitHub token
+                                  (SecretStorage), tag colour utils, version compare. Grab-bag.
+src/settings/data.ts        (332) ManagerSettings (the whole data.json schema) + DEFAULT_SETTINGS + small types.
+src/data/types.ts            (94) ManagerPlugin, Tag/Type(=group), Delay, RibbonItem, BetaSource, … + special tag ids.
+src/data/data.ts             (19) unused-ish style label maps.
+src/obsidian-internals.ts    (89) Hand-written typings for undocumented app.plugins / app.setting / leftRibbon.
+src/command.ts              (704) Command palette: static + dynamic (per plugin/group/tag/profile) commands,
+                                  plugin-control SuggestModals, profiles, "restore previous state" snapshot.
+src/migrations.ts           (262) Versioned data migrations (0.3.1, 0.3.2), MIGRATION_VERSION bookkeeping.
+src/self-check.ts           (324) Delay-mode "takeover" check of community-plugins.json + TakeoverModal.
+src/repo-resolver.ts        (258) plugin id → GitHub repo (REPO_MAP → on-disk cache → official community list).
+src/agreement.ts            (167) obsidian://BPM-plugin-install / BPM-plugin-github protocol handlers (legacy code).
+src/github-url.ts            (47) Optional GitHub proxy URL rewriting ({url} / {encodedUrl} templates or prefix).
+src/github-install.ts       (594) GitHub release listing (+5 min cache), plugin & theme install from releases.
+src/source-release.ts       (240) Pure-ish logic: pick target release for a BetaSource, decide "has update".
+src/import-export.ts       (1330) Transfer Pack (JSON, schema better-plugins-manager.transfer/v1): build/parse/preview/apply.
+src/note-tip.ts             (204) Hover tooltip on the BPM ribbon icon listing plugin notes; right-click config panel.
+src/vault-share.ts          (145) STUB. Every function returns "unavailable in the community-store build".
+src/utils.ts                 (89) confirmWithModal, managerOpen (electron shell.openPath).
+src/electron.d.ts             (5) declare module "electron" { shell.openPath }.
+src/manager/system-ribbon-manager.ts (104) VESTIGIAL. Constructed but load/save/startWatch never called.
+src/modal/manager-modal.ts (7977) THE UI. One Modal class with 8 "pages" + AppearanceProfileModal. God object.
+src/modal/*.ts             (~2.3k) Auxiliary modals: group/tags/note/hide/delete/update/update-check/ribbon/
+                                  bulk-status-confirm. disable-modal.ts is unused.
+src/settings/index.ts + ui/ (~900) PluginSettingTab with tabs: basis, main-page actions, style, groups, tags, delay.
+src/troubleshoot/         (~1.9k) Conflict bisection: algorithm, persisted state, TWO front-ends (floating
+                                  TroubleshootModal + embedded TroubleshootPanel), result modal + Markdown report.
+src/lang/inxdex.ts          (100) Translator (sic, "inxdex"). Locales in src/lang/locale/*.ts.
+styles.css               (13956) All styling; mostly `.manager-*` BEM-ish classes, 363 `!important`.
+```
+
+---
+
+## Core model
+
+### `data.json` (`ManagerSettings`, `src/settings/data.ts`)
+Everything BPM knows lives in one object, loaded with a **shallow** `Object.assign({}, DEFAULT_SETTINGS, await loadData())`
+(so default arrays/objects are shared references when the key is absent from disk). Notable fields:
+
+- `Plugins: ManagerPlugin[]`: BPM's per-plugin record `{id, name, desc, group, tags[], enabled, delay, note}`.
+  `name`/`desc` are *user-overridable* display values (seeded from the manifest). `group` is a single group id; `tags` many tag ids;
+  `delay` a `DELAYS[].id`.
+- `GROUPS` (type `Type`), `TAGS`, `DELAYS`: taxonomy lists referenced by id.
+- `HIDES`: plugin ids hidden from the manager list (display only).
+- `PLUGIN_LAYOUT`: manual ordering + named separators for the plugin list.
+- `REPO_MAP`: confirmed `pluginId → owner/repo`. `BPM_INSTALLED`: ids installed via BPM.
+- `BETA_SOURCES`: tracked GitHub sources (`BetaSource`): `mode: latest|frozen`, `updateCheckMode: release|version`,
+  `compatibilityMode`, `updateDelayDays`, `autoUpdate`, plus a lot of cached release metadata.
+- `RIBBON_SETTINGS`: `{id, name, icon, visible, order}` per ribbon item.
+- `COMMAND_PROFILES` / `COMMAND_LAST_STATE`: saved enable-state maps; one undo snapshot.
+- `APPEARANCE_PROFILES`: theme + CSS-snippet combos ("外观方案").
+- `TROUBLESHOOT_STATE`: persisted bisection session (survives restarts).
+- `GITHUB_TOKEN`: legacy plaintext token; migrated into `app.secretStorage` (`"github-token"`) when that API exists.
+- `SHARED_VAULT_*`, `EXPORT_DIR`: dead/legacy.
+
+An extra cache file is written to `<configDir>/better-plugins-manager-community-plugins-cache.json` (repo map snapshot).
+
+### Special tags (ids are stable, names localised)
+- `bpm-install`: auto-added to plugins in `BPM_INSTALLED`.
+- `bpm-ignore`: "leave this plugin under Obsidian's native control". Ignored plugins are excluded from delay-start,
+  takeover, commands, bulk toggles, and their toggle in the manager is locked.
+- `bpm-eondr-plugin`: upstream author's self-branding. Auto-applied to plugin id `i18n` or any repo owned by `eondrcode`
+  (`EONDR_PLUGIN_RULES` in `src/main.ts`).
+
+### Two enable-state models (the most important concept)
+Whether a plugin "is enabled" has **two sources of truth depending on mode**:
+
+| Mode | Source of truth | How BPM enables/disables |
+|---|---|---|
+| Normal (`DELAY=false`), or plugin tagged `bpm-ignore` | `app.plugins.enabledPlugins` (= `community-plugins.json`) | `enablePluginAndSave` / `disablePluginAndSave` |
+| Delay mode (`DELAY=true`) | `ManagerPlugin.enabled` in BPM's `data.json` | in-memory `enablePlugin` / `disablePlugin`, and BPM re-enables at startup |
+
+This branching is re-implemented in several places that don't agree in the details:
+`command.ts isPluginEnabled`, `manager-modal.ts isPluginEnabledForDisplay` (also counts loaded instances and
+"single-started" ids) and `isManagedPluginEnabled`, `troubleshoot-algorithm.ts getEnabledPlugins/setEnabledPlugins`,
+`import-export.ts` (which ignores delay mode entirely), and `github-install.ts` (also ignores it).
+Any refactor should start by giving this one owner.
+
+### Delay-start mechanics
+- Turning delay mode **on** (`enableDelaysForAllPlugins`): for each enabled, non-ignored plugin:
+  `disablePluginAndSave` (removes it from `community-plugins.json` *and unloads it*) then `enablePlugin` (reloads it in-memory).
+  So every plugin gets a full unload/reload just to edit the startup list.
+- Every startup with `DELAY=true`: Obsidian loads only what's left in `community-plugins.json` (BPM + ignored plugins).
+  BPM's `onload` then does `setTimeout(enablePlugin(id), delay.time*1000)` for each managed plugin with `enabled=true`
+  (delay 0 if no profile matches).
+- Turning delay **off**, *or BPM being unloaded while delay is on* (`disableDelaysForAllPlugins`): `disablePlugin` + `enablePluginAndSave`
+  for each enabled managed plugin, which writes them all back to `community-plugins.json` (again a full reload of each).
+  Obsidian does **not** unload plugins on app quit (verified), so this only runs when BPM itself is disabled, reloaded or updated.
+- Self-check (`self-check.ts`, 2 s after layout ready, delay mode only): any non-ignored plugin found in
+  `community-plugins.json` is a "takeover candidate". It shows `TakeoverModal`, or auto-takes over if `AUTO_TAKEOVER`.
+  Takeover rewrites `community-plugins.json` **directly on disk** to `[bpm, ...ignored]`.
+
+### Startup sequence (`Manager.onload`)
+1. `loadSettings` → `runMigrations` → pick language on first run → `new Translator`.
+2. Ensure built-in tags exist and normalise their names; ensure BPM's own record (always enabled, no delay, never hidden).
+3. `new RepoResolver`; ribbon config sync or clear.
+4. `addRibbonIcon` + `NoteTipFeature`; `addSettingTab`.
+5. `enableDelay()` or `disableDelay()` → `synchronizePlugins` (reconcile `Plugins[]` with installed manifests) and,
+   in delay mode, schedule the timed `enablePlugin`s.
+6. `Commands(app, this)` registers commands; save if anything was dirty.
+7. `new Agreement` (**fetches the full community-plugins.json on every startup**), fire-and-forget
+   `startupCheckForUpdates` and `startupMaintainBetaSources` (check + auto-update tracked sources).
+8. Register `obsidian://BPM-plugin-install` and `obsidian://BPM-plugin-github`.
+9. `onLayoutReady`: start ribbon runtime (drag-to-hide on desktop; MutationObserver on mobile menus);
+   after 2 s, clean `undefined` holes from `leftRibbon.items` and run the self-check.
+
+---
+
+## Obsidian internals relied on
+
+All undocumented, typed loosely in `src/obsidian-internals.ts` or via `@ts-ignore`/casts.
+
+| Internal | Used for | Verified semantics (1.13.7) |
+|---|---|---|
+| `app.plugins.manifests` | list installed plugins | populated by `loadManifests()`; **not** auto-refreshed when files appear on disk |
+| `app.plugins.enabledPlugins: Set` | "enabled" in normal mode | the **persisted** startup set, mirror of `community-plugins.json`; *not* "currently loaded" |
+| `app.plugins.plugins[id]` | detect loaded instance | the actually-loaded plugin objects |
+| `enablePlugin(id, userEnable?)` | delay start, single start | returns `Promise<boolean>` (BPM types it `void`). Returns `false` if `manifests[id]` is missing, restricted mode, deprecated/blocklisted, or desktop-only on mobile. Doesn't touch `enabledPlugins`. Idempotent (`loadPlugin` returns the existing instance). |
+| `disablePlugin(id)` | | unload only |
+| `enablePluginAndSave` / `disablePluginAndSave` | normal-mode toggles | `enablePlugin(id,true)` then `enabledPlugins.add` + `requestSaveConfig()` (debounced 1 s) / `enabledPlugins.delete` + `requestSaveConfig()` + `disablePlugin(id,true)` |
+| `saveConfig()` | (not used by BPM) | writes `Array.from(enabledPlugins)` to `community-plugins.json` |
+| vault `raw` → `plugins.onRaw` | | **never re-reads `community-plugins.json`**; only calls `plugin.onConfigFileChange()` for `<id>/data.json` changes, and only if `enabledPlugins.has(id)` |
+| `installPlugin(repo, version, manifest)`, `uninstallPlugin`, `loadManifests` | protocol install, delete | |
+| `app.setting.open/openTabById/activeTab` | open plugin settings / hotkeys tab | |
+| `app.commands.removeCommand`, `.commands` | dynamic command refresh | |
+| `app.customCss.setTheme/theme/enabledSnippets` | themes & snippets pages | |
+| `app.secretStorage.get/setSecret` | GitHub token | probed defensively |
+| `app.i18n.locale`, `window.moment.locale()` | first-run language | |
+| `workspace.leftRibbon.items` | ribbon manager | items are `{id, icon, title, callback, hidden, buttonEl}`; native order/hidden persist in `workspace.json` `left-ribbon.hiddenItems` (key order = order); `addRibbonItemButton` updates an existing id **in place** |
+
+Consequences worth internalising:
+- Writing `community-plugins.json` directly (self-check takeover) leaves Obsidian's in-memory `enabledPlugins` stale, so the
+  next `*AndSave` from anywhere rewrites the file from memory and silently undoes the takeover. The correct move is to mutate
+  `app.plugins.enabledPlugins` and call `saveConfig()`/`requestSaveConfig()`.
+- Plugins started by BPM's delay mode are not in `enabledPlugins`, so they **never get `onConfigFileChange()`** (e.g. when
+  Obsidian Sync updates their `data.json`). That's a real, undocumented cost of delay mode.
+- Editing the startup list doesn't require reloading plugins at all (see the delay toggle above).
+
+### Verifying Obsidian internals
+```sh
+curl -sSL https://raw.githubusercontent.com/obsidianmd/obsidian-releases/master/desktop-releases.json   # latest version + asar URL
+curl -sSLO https://github.com/obsidianmd/obsidian-releases/releases/download/v1.13.7/obsidian-1.13.7.asar.gz
+gunzip obsidian-1.13.7.asar.gz && npx @electron/asar extract obsidian-1.13.7.asar app
+# app/app.js is one 3.8 MB minified line: slice around a symbol with python, e.g.
+python3 -c "s=open('app/app.js').read(); i=s.find('enablePluginAndSave='); print(s[i-2000:i+800])"
+```
+
+---
+
+## Features, module by module
+
+### Manager modal (`src/modal/manager-modal.ts`)
+- Pages (`ManagerPage`): `plugins`, `themes` (appearance overview: profiles/themes/snippets), `install`, `sources`, `transfer`,
+  `vaults` (disabled by `SHARED_VAULTS_ENABLED=false`, backed by the stub), `ribbon` (only if ribbon manager on), `troubleshoot`.
+- `renderContent()` / `reloadShowData()` dispatch on `activePage`. A monotonically increasing `renderGeneration` lets async
+  renders bail out if the user navigated away (`isRenderCurrent`).
+- `showData()` (~1100 lines, ~3049–4145) builds the plugin list in batches of `renderBatchSize = 80`; each card registers a
+  `PluginCardController` so single cards can be refreshed (`refreshPluginCard`) without a full re-render.
+- Card actions are configurable to sit on the card or in the right-click menu (`MAIN_PAGE_ACTION_PLACEMENT`, settings page
+  "主页面功能"). The action wiring is written out three times: desktop context menu (~3205), mobile menu (~3674), on-card buttons (~3818).
+- Filters: status / group / tag / delay, each multi-select with `contains | not-contains`; optionally persisted
+  (`PERSISTENCE`, `FILTER_*`). Search is debounced (120 ms render, 350 ms persist).
+- Modes: `editorMode` (edit names/descs/layout, separators, drag reorder via custom pointer-drag), `bulkEditMode`
+  (multi-select → group/tags/delay/enable/disable). `developerMode` is never set to true (dead buttons).
+- House style shared by all modals: remove Obsidian's `.modal-close-button`, build a custom title bar from `Setting`.
+
+### Install & update pipeline
+- `fetchReleaseVersions` (`github-install.ts`): `/releases/latest` + paginated `/releases?per_page=100`; drafts dropped;
+  with `includeManifest`, it fetches **each release's** `manifest.json` (asset, else raw at tag) to learn `minAppVersion`.
+  Cached 5 min per (repo, token?, proxy, includeManifest).
+- `installPluginFromGithub`: release assets `manifest.json`/`main.js`/`styles.css` in parallel; if incomplete, falls back to
+  `raw.githubusercontent.com/<repo>/<tag or v-variant>/…`. Writes files → `disablePlugin` → `enablePluginAndSave` →
+  `BPM_INSTALLED`/`REPO_MAP` → `loadManifests()` → upsert record (`enabled = true`) → save.
+- `installThemeFromGithub`: assets `manifest.json` + `theme.css` (or `themes.css`/`theme-beta.css`), writes to
+  `themes/<manifest.name>/`, then `customCss.setTheme`.
+- Update check (`Manager.checkUpdates`): downloads `community-plugin-stats.json` (official plugins' version map), then for
+  every plugin *sequentially* resolves its repo and fetches release versions (with manifests). `source-release.ts` decides the
+  target: `frozen` → pinned tag; `latest` → GitHub's "latest" release if compatible + old enough
+  (`updateDelayDays`), else first matching release. "Has update" is by **release order/date** (`release` mode) or by version
+  number (`version` mode).
+- Repo resolution priority: `REPO_MAP` → on-disk cache → official `community-plugins.json` (result written back to `REPO_MAP`).
+- GitHub proxy (`GITHUB_PROXY`): disables token use entirely (the token is never sent through a proxy).
+
+### Transfer Pack (`src/import-export.ts`)
+JSON with `schema: "better-plugins-manager.transfer/v1"`. Export selects plugins / themes / plugin `data.json` configs /
+taxonomy / layout+ribbon / sources / workspace prefs. Import has a preview step and per-category opt-ins.
+Path safety on import is careful (`getSafePluginId`, `normalizePackageRelativePath`, prefix check).
+The format supports base64 **file bundles** (offline plugin/theme install), but the current export never produces
+them (`collectPluginFiles` is commented out, themes are collected with `includeFiles=false`). Import still accepts them.
+
+### Conflict diagnosis (`src/troubleshoot/`)
+Adaptive group testing driven by the user answering "problem still exists?":
+1. Disable everything. If the problem persists → not a plugin issue.
+2. `bisect-main`: test half C1; fail → recurse into C1; pass → test C2; fail → recurse into C2; both pass → cross-partition pair.
+3. `cross-pair-bisect-b/a`: keep A fully on, bisect B to find b*; then keep b* on, bisect A to find a*.
+4. `verify-single` / `verify-pair` at sizes 1 and 2.
+State persists in `TROUBLESHOOT_STATE`. Two separate UIs drive the same algorithm and duplicate the feedback/undo/restore
+logic: `TroubleshootModal` (floating, hand-built DOM, from the command palette) and `TroubleshootPanel` (manager page).
+The report is a Markdown file created in the vault root.
+
+### Ribbon manager
+Pure CSS/DOM at runtime: matches `.side-dock-ribbon-action` elements to `RIBBON_SETTINGS` **by aria-label text**,
+then sets `style.order` / `style.display`, remembering originals in `data-bpm-original-*` attributes so they can be restored.
+On mobile, it reorders `.menu-item`s inside the ribbon menu via a body-wide MutationObserver. Desktop "drag an icon out
+of the ribbon to hide it" uses capture-phase pointer listeners on `activeDocument`.
+
+### Commands (`src/command.ts`)
+Static: `manager-view`, `control-plugin`, `save-command-profile`, `restore-previous-command-state`, `troubleshoot-conflicts`.
+Dynamic (opt-in): per-plugin toggle `manager-<id>`, per-group `manager-<gid>-enabled|disable`, per-tag
+`manager-tag-<tid>-enabled|disable`, per-profile `manager-profile-<pid>-apply`. Dynamic commands are rebuilt by calling
+`Commands(app, manager)` again (a WeakMap keeps one service per Manager). Their *names* embed the current state
+("Enable X"/"Disable X"), so every toggle triggers a command refresh.
+
+### i18n (`src/lang/`)
+- **Keys are Chinese strings** (e.g. `"管理器_删除插件_描述"`), mostly `<area>_<thing>_<kind>`; newer keys are English snake_case
+  (`command_*`). `zh_cn.ts` is the canonical key set.
+- Fallback: selected locale → `en` → `zh_cn` → the raw key. Interpolation `{name}`; some older call sites use `.replace('{count}', …)` instead.
+- `Translator.t` has an overload taking any `string`, so **typos in keys aren't caught by the compiler**.
+- Coverage (2026-10-05): zh_cn 953 keys, en 953, es/fr/ja/ko/ru 777 each (the same 176 keys missing → English fallback).
+  One key used in code is defined nowhere: `通用_确认_文本`. 144 keys are never referenced literally (some may be built dynamically).
+- Adding a language: new file in `locale/`, register in `Translator.language`, `Translator.localeMap`, and the locale maps
+  in both `Translator.normalizeLang` and `Manager.getAppLanguage` (duplicated).
+
+---
+
+## Known issues
+
+Ranked roughly by user impact. [C] = confirmed by reading code (and Obsidian source where relevant).
+[L] = very likely from code + Obsidian source, but *(runtime-unverified)*.
+
+### Correctness
+1. [C] **Every confirm dialog's title is the raw key `通用_确认_文本`.** The key is undefined in all locales and all 14
+   `confirmWithModal` callers pass a bare string (`src/utils.ts`). The confirm button text defaults to untranslated `"OK"`.
+2. [L] **Brand-new GitHub installs aren't actually enabled.** `installPluginFromGithub` calls `enablePluginAndSave` *before*
+   `loadManifests()`; for a new plugin `manifests[id]` is absent, so Obsidian's `enablePlugin` returns `false`, but BPM's
+   record is set to `enabled: true`.
+3. [C] **Installing/updating force-enables plugins.** Every install/update ends in `enablePluginAndSave` + `enabled = true`,
+   including "download update" on a disabled plugin and **startup auto-update of tracked sources**.
+4. [C] **Install/update ignores delay mode.** `enablePluginAndSave` puts the plugin back into `community-plugins.json` → takeover nag next start.
+5. [C] **Self-check takeover is undone silently** by the next `*AndSave` anywhere (stale in-memory `enabledPlugins`, see internals).
+6. [C] **Conflict-diagnosis undo is broken.** `undo()` restores the plugin set and `suspectPool` (unused by the current
+   algorithm) but not `algorithmState`, so the next answer is applied to the wrong stage. In the cross-pair stages, the
+   history records `searchSet` as "previously enabled", but `fixedSet + searchHalf` was actually enabled. Fix: snapshot the
+   whole (JSON-cloneable) `algorithmState` into each history item.
+7. [C] Conflict diagnosis with 0 or 1 enabled plugins never reaches a terminal case (bisects empty sets).
+8. [C] **Transfer-pack import ignores delay mode.** `wasEnabled = enabledPlugins.has(id)` is false for BPM-started plugins, so
+   config import writes `data.json` under a *running* plugin (which may overwrite it on its next `saveData`), and
+   `applyEnabledState` uses `*AndSave`. `applyWorkspaceSettings` flips `DELAY` without running the delay on/off transition.
+9. [C] `NoteTip` tooltip title is always Chinese for non-Chinese users: `DEFAULT_NOTE_TIP.title = "📌 插件备注"` is merged in by
+   `loadCfg`, so `cfg.title || t(...)` never falls through to the translation. Its config panel doesn't close on Escape/outside click.
+10. [C] `ManagerModal.openAsync` adds a global `keydown` (Ctrl+F) listener on every open and never removes it (leak).
+    `manager.managerModal` is never cleared on close.
+11. [C] `agreement.ts`: `params.enable.toLowerCase()` throws when `enable` is absent; the parsed `github` param is never
+    passed through.
+12. [C] Three version comparators (`main.ts compareVersions`, `migrations.ts`, `source-release.ts compareVersionTags`) with
+    different rules, none semver-correct: `1.0.0-beta.1` compares *greater* than `1.0.0`.
+13. [C] Running the troubleshoot command twice stacks two floating windows; they're hand-built DOM, not torn down on unload.
+
+### Security / trust
+- [C] `obsidian://BPM-plugin-install?id=<community id>&enable=true` installs **and enables** a plugin with no confirmation UI.
+- [C] Remote `manifest.id` / theme `manifest.name` go into filesystem paths unchecked in `github-install.ts`
+  (`import-export.ts`'s `getSafePluginId` exists but isn't reused).
+
+### Performance
+- [C] `Agreement`'s constructor downloads the full community plugin list on every startup (unconditional network);
+  `RepoResolver` separately fetches and caches the same list.
+- [C] Delay on/off reloads every plugin twice over; editing the startup set needs no reloads.
+- [C] Update checks are sequential per plugin and fetch a manifest for every release of every plugin.
+
+### Structure / smells
+- Enable-state logic duplicated ~6× (see above). `manager-modal.ts` is an 8k-line god object.
+- `settings/ui/manager-group.ts`, `manager-tag.ts`, `manager-delay.ts` are near-copies.
+- Dead code: `vault-share.ts` (stub) + all `vaults` page UI, `SystemRibbonManager`, `DisableModal`, `developerMode`
+  buttons, `getActivePlugins/processPlugins` (with `console.log`, and an `obsidian://BPM-install` link to a handler that
+  doesn't exist), `applyRibbonConfigToMemory` ignores its arguments, `savePluginAndExport` is just `saveSettings`.
+- Upstream branding baked in: `bpm-eondr-plugin` auto-tag, hardcoded QQ support-group link (`SUPPORT_QQ_GROUP_URL`),
+  Afdian funding link, bilibili tutorial link.
+- `ManagerBasis` language change / delay toggle call `render()` on a container that `renderSettings()` just detached.
+
+---
+
+## Open questions
+
+- How much of the ribbon manager is redundant with Obsidian's native ribbon order/hide persistence (which is keyed by id and
+  keeps slots for late-registering plugins)? Needs a runtime test with delay-started plugins.
+- Does `require("electron")` (top-level import in `utils.ts`) behave on mobile? The plugin claims mobile support, so presumably
+  it resolves harmlessly, but nothing in the code guards it.
+- Is the delay-start feature still worth its costs (no `onConfigFileChange`, takeover dance, two enable-state models), or
+  could it be rebuilt on top of `enabledPlugins` + a delayed second pass?
