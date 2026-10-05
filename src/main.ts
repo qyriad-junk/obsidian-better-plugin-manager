@@ -558,9 +558,9 @@ export default class Manager extends Plugin {
 
     private async startupCheckForUpdates() {
         if (!this.settings.STARTUP_CHECK_UPDATES) return;
+        const manifests = Object.values(this.appPlugins.manifests).filter((pm: PluginManifest) => pm.id !== this.manifest.id);
+        const progress = this.showUpdateProgress(manifests.length);
         try {
-            const manifests = Object.values(this.appPlugins.manifests).filter((pm: PluginManifest) => pm.id !== this.manifest.id);
-            const progress = this.showUpdateProgress(manifests.length);
             let processed = 0;
             const status = await this.checkUpdates({
                 onProgress: () => { processed++; progress.update(processed); },
@@ -571,12 +571,13 @@ export default class Manager extends Plugin {
                 const msg = this.translator.t("通知_可更新数量").replace("{count}", `${count}`);
                 new Notice(msg, 5000);
             }
-            progress.dispose();
         } catch (e) {
             if (this.settings.DEBUG) console.error("[BPM] startup check updates failed", e);
             if (!githubProxyEnabled(this) && !this.hasGithubToken()) {
                 new Notice(this.translator.t("通知_检查更新失败_建议Token"));
             }
+        } finally {
+            progress.dispose();
         }
     }
 
