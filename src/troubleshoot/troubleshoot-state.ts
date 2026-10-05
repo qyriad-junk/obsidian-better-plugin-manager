@@ -35,6 +35,9 @@ export interface TroubleshootState {
 
     /** 新算法状态 */
     algorithmState?: AlgorithmState;
+
+    /** 当前这一步要用户测试的内容说明（持久化，以便撤销或重启 Obsidian 后仍能显示） */
+    currentTestDescription?: string;
 }
 
 export interface AlgorithmState {
@@ -79,13 +82,23 @@ export interface AlgorithmState {
 }
 
 export interface TroubleshootHistoryItem {
-    action: 'disable-all' | 'enable-half' | 'disable-half' | 'isolate' | 'test-pair';
-    /** 操作前的插件状态快照 */
+    /**
+     * 'answer'：用户回答一次之前的完整快照（当前算法使用）。
+     * 其余取值来自旧版本保存的排查进度，仅用于兼容读取。
+     */
+    action: 'answer' | 'disable-all' | 'enable-half' | 'disable-half' | 'isolate' | 'test-pair';
+    /** 操作前实际启用的插件 */
     previousEnabledPlugins: string[];
     /** 用户反馈 */
     userFeedback?: 'problem-exists' | 'problem-gone';
     /** 当时的嫌疑池 */
     suspectPoolSnapshot: string[];
+    /** 回答之前的算法状态；撤销时整体恢复。旧版本保存的历史没有此字段。 */
+    algorithmState?: AlgorithmState;
+    /** 回答之前的步骤编号 */
+    currentStep?: number;
+    /** 回答之前显示的测试说明 */
+    currentTestDescription?: string;
 }
 
 /** 默认排除的核心插件（不参与排查） */

@@ -12,7 +12,6 @@ export class TroubleshootPanel {
     private algorithm: TroubleshootAlgorithm;
     private containerEl: HTMLElement | null = null;
     private state: TroubleshootState = cloneState(INITIAL_TROUBLESHOOT_STATE);
-    private lastDescription = "";
     private onStateChange?: RenderCallback;
     private t: (key: string) => string;
 
@@ -156,7 +155,7 @@ export class TroubleshootPanel {
         progress.setAttribute("aria-valuenow", `${percent}`);
         progress.createDiv("manager-troubleshoot__progress-bar").style.width = `${percent}%`;
 
-        const description = this.lastDescription || this.getCurrentTestDescription();
+        const description = this.state.currentTestDescription || this.getCurrentTestDescription();
         if (description) {
             stage.createDiv({ cls: "manager-troubleshoot__current-test", text: `${this.t("排查_当前测试")}: ${description}` });
         }
@@ -343,7 +342,6 @@ export class TroubleshootPanel {
 
     private async startTroubleshoot() {
         this.state = this.algorithm.initState();
-        this.lastDescription = this.t("排查_描述_禁用全部");
         await this.algorithm.startTroubleshoot(this.state);
         await this.saveState();
         this.onStateChange?.();
@@ -369,9 +367,6 @@ export class TroubleshootPanel {
                 await this.restoreAndReset();
                 return;
             case "continue":
-                if (result.nextAction.action === "test") {
-                    this.lastDescription = result.nextAction.description;
-                }
                 await this.saveState();
                 this.onStateChange?.();
                 this.render();

@@ -24,7 +24,6 @@ export class TroubleshootModal {
     private algorithm: TroubleshootAlgorithm;
     private state: TroubleshootState;
     private t: (key: string) => string;
-    private lastDescription = '';
 
     // 悬浮窗元素
     private containerEl: HTMLElement | null = null;
@@ -282,9 +281,9 @@ export class TroubleshootModal {
         this.contentEl.createEl('p', { text: phaseText, cls: 'troubleshoot-phase' });
 
         // 当前操作描述
-        if (this.lastDescription) {
+        if (this.state.currentTestDescription) {
             this.contentEl.createEl('p', {
-                text: `${this.t('排查_当前测试')}: ${this.lastDescription}`,
+                text: `${this.t('排查_当前测试')}: ${this.state.currentTestDescription}`,
                 cls: 'troubleshoot-desc'
             });
         }
@@ -365,7 +364,6 @@ export class TroubleshootModal {
      */
     private async startTroubleshoot() {
         this.state = this.algorithm.initState();
-        this.lastDescription = this.t('排查_描述_禁用全部');
 
         await this.algorithm.startTroubleshoot(this.state);
         await this.saveState();
@@ -412,9 +410,6 @@ export class TroubleshootModal {
                 return;
 
             case 'continue':
-                if (result.nextAction.action === 'test') {
-                    this.lastDescription = result.nextAction.description;
-                }
                 await this.saveState();
                 await this.render();
                 return;

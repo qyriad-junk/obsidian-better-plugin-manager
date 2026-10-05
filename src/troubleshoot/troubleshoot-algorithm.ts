@@ -11,7 +11,9 @@
 
 import { App, PluginManifest } from 'obsidian';
 import Manager from 'main';
-import { TroubleshootState, TroubleshootHistoryItem, CORE_PLUGINS_EXCLUDE } from './troubleshoot-state';
+import { TroubleshootState, TroubleshootHistoryItem, AlgorithmState, CORE_PLUGINS_EXCLUDE } from './troubleshoot-state';
+
+const cloneAlgorithmState = (algo: AlgorithmState): AlgorithmState => JSON.parse(JSON.stringify(algo));
 
 export type AlgorithmResult =
     | { type: 'single'; culprit: string }
@@ -157,22 +159,25 @@ export class TroubleshootAlgorithm {
     }
 
     /**
-     * 记录历史
+     * 在用户回答之前，为整个排查状态拍一张快照。
+     *
+     * 撤销需要同时回到"当时启用了哪些插件"和"算法走到了哪一步"，所以这里记录实际启用的插件
+     * （而不是由各阶段自行传入，容易传错）以及完整的 algorithmState。
      */
-    recordHistory(
-        state: TroubleshootState,
-        action: TroubleshootHistoryItem['action'],
-        enabledPlugins: string[]
-    ): void {
-        state.history.push({
-            action,
-            previousEnabledPlugins: [...enabledPlugins],
+    private snapshotBeforeAnswer(state: TroubleshootState, problemExists: boolean): TroubleshootHistoryItem {
+        return {
+            action: 'answer',
+            previousEnabledPlugins: this.getEnabledPlugins(),
+            userFeedback: problemExists ? 'problem-exists' : 'problem-gone',
             suspectPoolSnapshot: [...state.suspectPool],
-        });
+            algorithmState: state.algorithmState ? cloneAlgorithmState(state.algorithmState) : undefined,
+            currentStep: state.currentStep,
+            currentTestDescription: state.currentTestDescription,
+        };
     }
 
     /**
-     * 撤销上一步
+     * 撤销上一次回答：恢复当时启用的插件、算法状态与步骤说明。
      */
     async undo(state: TroubleshootState): Promise<boolean> {
         if (state.history.length === 0) return false;
@@ -180,7 +185,15 @@ export class TroubleshootAlgorithm {
         const lastStep = state.history.pop()!;
         await this.setEnabledPlugins(lastStep.previousEnabledPlugins);
         state.suspectPool = lastStep.suspectPoolSnapshot;
-        state.currentStep = Math.max(1, state.currentStep - 1);
+
+        if (lastStep.algorithmState) {
+            state.algorithmState = cloneAlgorithmState(lastStep.algorithmState);
+            state.currentStep = lastStep.currentStep ?? Math.max(1, state.currentStep - 1);
+            state.currentTestDescription = lastStep.currentTestDescription;
+        } else {
+            // 旧版本保存的历史没有算法快照，只能回退插件状态。
+            state.currentStep = Math.max(1, state.currentStep - 1);
+        }
 
         return true;
     }
@@ -204,13 +217,22 @@ export class TroubleshootAlgorithm {
         state: TroubleshootState,
         problemExists: boolean
     ): Promise<AlgorithmResult> {
-        const algo = state.algorithmState!;
-
-        // 记录用户反馈
-        if (state.history.length > 0) {
-            state.history[state.history.length - 1].userFeedback =
-                problemExists ? 'problem-exists' : 'problem-gone';
+        const snapshot = this.snapshotBeforeAnswer(state, problemExists);
+        const result = await this.dispatchAnswer(state, problemExists);
+        if (result.type === 'continue') {
+            state.history.push(snapshot);
+            if (result.nextAction.action === 'test') {
+                state.currentTestDescription = result.nextAction.description;
+            }
         }
+        return result;
+    }
+
+    private async dispatchAnswer(
+        state: TroubleshootState,
+        problemExists: boolean
+    ): Promise<AlgorithmResult> {
+        const algo = state.algorithmState!;
 
         switch (algo.stage) {
             case 'initial-confirm':
@@ -254,13 +276,17 @@ export class TroubleshootAlgorithm {
         algo.currentSet = [...state.originalEnabledPlugins];
         state.currentStep++;
 
+        // 0–2 个插件时无需二分，直接进入验证（或报告无法定位）
+        if (algo.currentSet.length <= 2) {
+            return this.continueOrFinishBisect(state, false);
+        }
+
         // 启用前半测试
         const [c1] = this.splitHalf(algo.currentSet);
         algo.testingHalf = 'first';
         algo.c1 = c1;
         algo.c2 = algo.currentSet.filter(id => !c1.includes(id));
 
-        this.recordHistory(state, 'enable-half', []);
         await this.setEnabledPlugins(c1);
 
         return {
@@ -286,13 +312,12 @@ export class TroubleshootAlgorithm {
         if (algo.testingHalf === 'first') {
             // 刚测试了 C1
             if (problemExists) {
-                // 问题在 C1，缩小范围
+                // 问题在 C1，缩小范围（此时恰好只启用了 C1）
                 algo.currentSet = algo.c1!;
-                return this.continueOrFinishBisect(state);
+                return this.continueOrFinishBisect(state, true);
             } else {
                 // C1 没问题，测试 C2
                 algo.testingHalf = 'second';
-                this.recordHistory(state, 'enable-half', algo.c1!);
                 await this.setEnabledPlugins(algo.c2!);
 
                 return {
@@ -307,9 +332,9 @@ export class TroubleshootAlgorithm {
         } else {
             // 刚测试了 C2
             if (problemExists) {
-                // 问题在 C2，缩小范围
+                // 问题在 C2，缩小范围（此时恰好只启用了 C2）
                 algo.currentSet = algo.c2!;
-                return this.continueOrFinishBisect(state);
+                return this.continueOrFinishBisect(state, true);
             } else {
                 // C1 和 C2 都没问题 → 跨分区冲突！
                 return this.startCrossPair(state, algo.c1!, algo.c2!);
@@ -319,16 +344,30 @@ export class TroubleshootAlgorithm {
 
     /**
      * 继续二分或完成
+     *
+     * @param failedWithExactlyCurrentSet 刚才的测试中是否恰好只启用了 currentSet 且问题存在。
+     *   为 true 且只剩一个插件时，它已经被单独验证过，无需再测一次。
      */
-    private async continueOrFinishBisect(state: TroubleshootState): Promise<AlgorithmResult> {
+    private async continueOrFinishBisect(state: TroubleshootState, failedWithExactlyCurrentSet: boolean): Promise<AlgorithmResult> {
         const algo = state.algorithmState!;
+
+        if (algo.currentSet.length === 0) {
+            return { type: 'error', message: this.manager.translator.t('排查_无法定位_通知') };
+        }
+
+        if (algo.currentSet.length === 1 && failedWithExactlyCurrentSet) {
+            algo.foundFirst = algo.currentSet[0];
+            state.result = { plugin1: algo.foundFirst, plugin2: '' };
+            state.status = 'completed';
+            state.phase = 'done';
+            return { type: 'single', culprit: algo.foundFirst };
+        }
 
         if (algo.currentSet.length === 1) {
             // 只剩一个，验证是否是单插件问题
             algo.stage = 'verify-single';
             algo.foundFirst = algo.currentSet[0];
 
-            this.recordHistory(state, 'isolate', algo.currentSet);
             await this.setEnabledPlugins([algo.foundFirst]);
 
             return {
@@ -348,7 +387,6 @@ export class TroubleshootAlgorithm {
             algo.pairToVerify = [...algo.currentSet];
             algo.verifyStep = 'test-first';
 
-            this.recordHistory(state, 'isolate', algo.currentSet);
             await this.setEnabledPlugins([algo.currentSet[0]]);
 
             return {
@@ -367,7 +405,6 @@ export class TroubleshootAlgorithm {
         algo.c1 = c1;
         algo.c2 = c2;
 
-        this.recordHistory(state, 'enable-half', algo.currentSet);
         await this.setEnabledPlugins(c1);
 
         return {
@@ -400,7 +437,6 @@ export class TroubleshootAlgorithm {
         algo.searchOtherHalf = algo.searchSet.filter(id => !b1.includes(id));
 
         const testSet = [...algo.fixedSet, ...b1];
-        this.recordHistory(state, 'test-pair', algo.c2!);
         await this.setEnabledPlugins(testSet);
 
         state.currentStep++;
@@ -447,7 +483,6 @@ export class TroubleshootAlgorithm {
             algo.searchOtherHalf = algo.searchSet.filter(id => !a1.includes(id));
 
             const testSet = [...algo.fixedSet, ...a1];
-            this.recordHistory(state, 'test-pair', algo.searchSet);
             await this.setEnabledPlugins(testSet);
 
             return {
@@ -466,7 +501,6 @@ export class TroubleshootAlgorithm {
         algo.searchOtherHalf = algo.searchSet.filter(id => !b1.includes(id));
 
         const testSet = [...algo.fixedSet, ...b1];
-        this.recordHistory(state, 'test-pair', algo.searchSet);
         await this.setEnabledPlugins(testSet);
 
         return {
@@ -520,7 +554,6 @@ export class TroubleshootAlgorithm {
         algo.searchOtherHalf = algo.searchSet.filter(id => !a1.includes(id));
 
         const testSet = [...algo.fixedSet, ...a1];
-        this.recordHistory(state, 'test-pair', algo.searchSet);
         await this.setEnabledPlugins(testSet);
 
         return {
@@ -586,7 +619,6 @@ export class TroubleshootAlgorithm {
 
             // 第一个没问题，测试第二个
             algo.verifyStep = 'test-second';
-            this.recordHistory(state, 'isolate', [pair[0]]);
             await this.setEnabledPlugins([pair[1]]);
 
             return {
@@ -624,8 +656,9 @@ export class TroubleshootAlgorithm {
     async startTroubleshoot(state: TroubleshootState): Promise<void> {
         const algo = state.algorithmState!;
         algo.stage = 'initial-confirm';
+        state.currentTestDescription = this.manager.translator.t('排查_描述_禁用全部');
 
-        this.recordHistory(state, 'disable-all', state.originalEnabledPlugins);
+        // 第一步不进入撤销历史：想回到开始之前，用"恢复并退出"。
         await this.setEnabledPlugins([]);
     }
 
