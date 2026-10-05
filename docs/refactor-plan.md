@@ -3,6 +3,16 @@
 Proposed 2026-10-05, after the trivial-bug pass (`fix/trivial-bugs`). Ordered so each step makes the next ones,
 and the known annoyances, smaller. Background and line-level detail: [codebase-notes.md](codebase-notes.md).
 
+## Decisions so far (Qyriad, 2026-10-05)
+
+- BPM's own per-plugin record is the source of truth for "wanted on", in both modes. (Step 1 as proposed.)
+- Startup should be framed as **"blocks workspace-ready" vs. "doesn't"**, not seconds: delays were only ever a way to
+  get plugins out of the blocking set. Step 2 is reframed accordingly (startup tiers; any remaining delay counts from
+  layout-ready).
+- Remove upstream branding (step 3).
+- The manager becomes a workspace tab, and **never auto-opens at startup** (step 7).
+- Runtime verification is possible now: `scripts/sandbox/` runs a real Obsidian headlessly.
+
 The guiding problem: **the code has no single owner for "is this plugin on, and how does it get started"**.
 Six places answer that question differently, and every annoyance and most remaining bugs sit on top of that.
 
