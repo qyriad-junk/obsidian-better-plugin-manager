@@ -227,7 +227,7 @@ export interface NoteTipSettings {
     groupId: string;
     /** filter 为 tag 时使用的标签 id。 */
     tagId: string;
-    /** tooltip 标题文本。 */
+    /** tooltip 标题文本；空字符串表示使用当前语言的默认标题。 */
     title: string;
     /** 最多展示的条数。 */
     max: number;
@@ -238,7 +238,7 @@ export const DEFAULT_NOTE_TIP: NoteTipSettings = {
     filter: "enabled",
     groupId: "",
     tagId: "",
-    title: "📌 插件备注",
+    title: "",
     max: 20,
 };
 

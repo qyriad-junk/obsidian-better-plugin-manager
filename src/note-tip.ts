@@ -1,6 +1,8 @@
 import Manager from "main";
 import { ManagerPlugin } from "./data/types";
 import { NoteTipSettings, DEFAULT_NOTE_TIP } from "./settings/data";
+import zh_cn from "./lang/locale/zh_cn";
+import en from "./lang/locale/en";
 
 /**
  * 备注 Tooltip（Note Tip）
@@ -15,6 +17,12 @@ import { NoteTipSettings, DEFAULT_NOTE_TIP } from "./settings/data";
 
 type NoteTipFilter = NoteTipSettings["filter"];
 
+/**
+ * 旧版本会把默认标题的译文（或硬编码的中文默认值）直接存进设置。
+ * 这些值视同"未自定义"，这样切换语言后标题也会跟着变。
+ */
+const LEGACY_DEFAULT_TITLES = new Set([zh_cn["备注Tooltip_默认标题"], en["备注Tooltip_默认标题"]]);
+
 const TOOLTIP_CLS = "bpm-notetip";
 const PANEL_CLS = "bpm-notetip-cfg";
 
@@ -23,6 +31,7 @@ export class NoteTipFeature {
     private ribbonEl: HTMLElement;
     private tooltip: HTMLElement | null = null;
     private panel: HTMLElement | null = null;
+    private panelCleanup: (() => void) | null = null;
 
     constructor(manager: Manager, ribbonEl: HTMLElement) {
         this.manager = manager;
@@ -56,7 +65,13 @@ export class NoteTipFeature {
 
     private loadCfg(): NoteTipSettings {
         const stored = this.manager.settings.NOTE_TIP;
-        return Object.assign({}, DEFAULT_NOTE_TIP, stored);
+        const cfg = Object.assign({}, DEFAULT_NOTE_TIP, stored);
+        if (LEGACY_DEFAULT_TITLES.has(cfg.title)) cfg.title = "";
+        return cfg;
+    }
+
+    private displayTitle(cfg: NoteTipSettings): string {
+        return cfg.title || this.manager.translator.t("备注Tooltip_默认标题");
     }
 
     private async saveCfg(cfg: NoteTipSettings) {
@@ -85,7 +100,7 @@ export class NoteTipFeature {
         const shown = rows.slice(0, Math.max(1, cfg.max || DEFAULT_NOTE_TIP.max));
 
         const tip = activeDocument.body.createDiv({ cls: TOOLTIP_CLS });
-        tip.createDiv({ cls: `${TOOLTIP_CLS}-title`, text: cfg.title || this.manager.translator.t("备注Tooltip_默认标题") });
+        tip.createDiv({ cls: `${TOOLTIP_CLS}-title`, text: this.displayTitle(cfg) });
         for (const p of shown) {
             const row = tip.createDiv({ cls: `${TOOLTIP_CLS}-row` });
             row.createSpan({ cls: `${TOOLTIP_CLS}-name`, text: p.name || p.id });
@@ -166,6 +181,7 @@ export class NoteTipFeature {
         panel.createDiv({ cls: `${PANEL_CLS}-label`, text: t("备注Tooltip_标题文本") });
         const titleInput = panel.createEl("input", { cls: `${PANEL_CLS}-input`, type: "text" });
         titleInput.value = cfg.title;
+        titleInput.placeholder = this.manager.translator.t("备注Tooltip_默认标题");
 
         // 最大条数
         panel.createDiv({ cls: `${PANEL_CLS}-label`, text: t("备注Tooltip_最大条数") });
@@ -186,7 +202,7 @@ export class NoteTipFeature {
                     filter: filterSel.value as NoteTipFilter,
                     groupId: groupSel.value,
                     tagId: tagSel.value,
-                    title: titleInput.value.trim() || this.manager.translator.t("备注Tooltip_默认标题"),
+                    title: titleInput.value.trim(),
                     max: Math.max(1, Math.min(50, Number(maxInput.value) || DEFAULT_NOTE_TIP.max)),
                 });
                 this.applyLabel();
@@ -195,9 +211,28 @@ export class NoteTipFeature {
         });
 
         this.panel = panel;
+
+        // Escape 或点击面板外部时关闭（右键图标本身由 togglePanel 处理）
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === "Escape") this.closePanel();
+        };
+        const onPointerDown = (event: PointerEvent) => {
+            const target = event.target as Node | null;
+            if (target && (panel.contains(target) || this.ribbonEl.contains(target))) return;
+            this.closePanel();
+        };
+        const doc = panel.doc;
+        doc.addEventListener("keydown", onKeyDown, true);
+        doc.addEventListener("pointerdown", onPointerDown, true);
+        this.panelCleanup = () => {
+            doc.removeEventListener("keydown", onKeyDown, true);
+            doc.removeEventListener("pointerdown", onPointerDown, true);
+        };
     }
 
     private closePanel() {
+        this.panelCleanup?.();
+        this.panelCleanup = null;
         this.panel?.remove();
         this.panel = null;
     }
