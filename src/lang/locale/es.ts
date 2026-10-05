@@ -307,6 +307,7 @@ export default {
     通用_关闭_文本: 'Deshabilitar',
     通用_开启_文本: 'Habilitar',
     通用_取消_文本: 'Cancelar',
+    通用_确认_文本: 'Confirmar',
     命令行_启用_文本: 'Habilitar',
     命令行_禁用_文本: 'Deshabilitar',
     命令行_分组_文本: 'Grupo',

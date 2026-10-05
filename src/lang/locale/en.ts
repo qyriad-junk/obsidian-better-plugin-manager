@@ -20,6 +20,7 @@ export default {
     通用_开启_文本: 'Enable',
     通用_保存_文本: 'Save settings',
     通用_取消_文本: 'Cancel',
+    通用_确认_文本: 'Confirm',
     通用_返回_文本: 'Back',
     通用_完成_文本: 'Done',
     通用_跳过_文本: 'Skipped',

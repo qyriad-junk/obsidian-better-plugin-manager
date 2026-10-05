@@ -17,6 +17,7 @@ export default {
     通用_开启_文本: 'Ouvrir',
     通用_保存_文本: 'Enregistrer',
     通用_取消_文本: 'Annuler',
+    通用_确认_文本: 'Confirmer',
     通用_返回_文本: 'Retour',
 
     导出_正文提示: 'Section corps : vous pouvez modifier ou remplacer ce contenu.',
