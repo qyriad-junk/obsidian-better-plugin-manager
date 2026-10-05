@@ -24,10 +24,9 @@ export default class ManagerBasis extends BaseSetting {
         languageDropdown.onChange((value) => {
             this.settings.LANGUAGE = value;
             void this.manager.saveSettings();
-            this.settingTab.basisDisplay();
             Commands(this.app, this.manager);
+            // renderSettings() rebuilds the whole tab (including this page) in the new language.
             this.settingTab.renderSettings();
-            this.render();
         });
 
         const persistenceBar = new Setting(this.containerEl)
@@ -62,8 +61,8 @@ export default class ManagerBasis extends BaseSetting {
             } else {
                 void this.manager.disableDelaysForAllPlugins();
             }
+            // Rebuild the tab bar too: the Delay tab only exists while delay mode is on.
             this.settingTab.renderSettings();
-            this.render();
         });
 
         const autoTakeoverBar = new Setting(this.containerEl)
