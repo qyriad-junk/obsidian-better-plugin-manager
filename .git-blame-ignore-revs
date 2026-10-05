@@ -1,0 +1,5 @@
+# Commits that only reformat, skipped by `git blame` and GitHub's blame view.
+# Locally: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# chore: normalize all text files to LF and enforce it with .gitattributes
+be1f4a3dbc0a060b2659a87e3520521094e61dab
