@@ -615,6 +615,7 @@ export default {
     安装_错误_manifest缺少ID: 'manifest.json is missing the id field and cannot be installed.',
     安装_错误_缺少主题资源: 'manifest.json or theme.css was not found.',
     安装_错误_主题manifest缺少名称: 'Theme manifest is missing the name field.',
+    安装_错误_名称不安全: 'Refusing to install: the manifest id or name "{name}" isn\'t usable as a folder name (it contains / \\ or :, or is . or ..).',
     安装_主题成功_提示: 'Installed/updated theme: {name}',
     安装_主题错误_通用: 'Theme install failed. Check the repository, version, or network.',
     安装_版本更新信息_标题: 'Release notes',

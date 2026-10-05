@@ -4,6 +4,7 @@ import Manager from "main";
 import type { ManagerPlugin } from "./data/types";
 import { BPM_TAG_ID } from "./repo-resolver";
 import { resolveGithubUrl } from "./github-url";
+import { getSafePathSegment } from "./path-safety";
 
 /**
  * GitHub release 资源描述。
@@ -471,6 +472,11 @@ export const installPluginFromGithub = async (
 			new Notice(manager.translator.t("安装_错误_manifest缺少ID"));
 			return false;
 		}
+		// manifest.id becomes a folder name under <configDir>/plugins; don't let a remote manifest escape it.
+		if (getSafePathSegment(manifest.id) !== manifest.id) {
+			new Notice(manager.translator.t("安装_错误_名称不安全", { name: manifest.id }));
+			return false;
+		}
 
 		if (manager.settings.DEBUG) console.log("[BPM] manifest parsed", { id: manifest.id, version: manifest.version });
 
@@ -567,6 +573,11 @@ export const installThemeFromGithub = async (manager: Manager, repoInput: string
 		const manifest = JSON.parse(manifestText) as { name: string };
 		if (!manifest?.name) {
 			new Notice(manager.translator.t("安装_错误_主题manifest缺少名称"));
+			return false;
+		}
+		// manifest.name becomes a folder name under <configDir>/themes; don't let a remote manifest escape it.
+		if (getSafePathSegment(manifest.name) !== manifest.name) {
+			new Notice(manager.translator.t("安装_错误_名称不安全", { name: manifest.name }));
 			return false;
 		}
 

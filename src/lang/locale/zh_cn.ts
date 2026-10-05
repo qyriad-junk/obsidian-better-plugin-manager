@@ -617,6 +617,7 @@ export default {
     安装_错误_manifest缺少ID: 'manifest.json 缺少 id 字段，无法安装。',
     安装_错误_缺少主题资源: '未找到 manifest.json 或 theme.css 资源。',
     安装_错误_主题manifest缺少名称: '主题 manifest 缺少 name 字段。',
+    安装_错误_名称不安全: 'manifest 中的 id 或 name「{name}」不能用作文件夹名（含有 / \\ : 或为 . / ..），已拒绝安装。',
     安装_主题成功_提示: '已安装/更新主题：{name}',
     安装_主题错误_通用: '主题安装失败，请检查仓库地址、版本或网络状态。',
     安装_版本更新信息_标题: '版本更新信息',

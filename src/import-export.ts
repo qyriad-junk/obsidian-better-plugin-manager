@@ -11,6 +11,7 @@ import {
 	Type,
 } from "./data/types";
 import { installPluginFromGithub, installThemeFromGithub, sanitizeRepo } from "./github-install";
+import { getSafePathSegment } from "./path-safety";
 
 export const MANAGER_TRANSFER_SCHEMA = "better-plugins-manager.transfer/v1";
 
@@ -314,19 +315,8 @@ const base64ToArrayBuffer = (data: string): ArrayBuffer => {
 
 const decodeBase64Text = (data: string): string => new TextDecoder().decode(base64ToArrayBuffer(data));
 
-const getSafePluginId = (pluginId: string): string => {
-	const id = (pluginId || "").trim();
-	if (!id || id === "." || id === "..") return "";
-	if (id.includes("/") || id.includes("\\") || id.includes(":")) return "";
-	return id;
-};
-
-const getSafePackageFolderName = (name: string): string => {
-	const folder = (name || "").trim();
-	if (!folder || folder === "." || folder === "..") return "";
-	if (folder.includes("/") || folder.includes("\\") || folder.includes(":")) return "";
-	return folder;
-};
+const getSafePluginId = getSafePathSegment;
+const getSafePackageFolderName = getSafePathSegment;
 
 const normalizePackageRelativePath = (path: string): string => {
 	const normalized = normalizePath((path || "").replace(/\\/g, "/"));
