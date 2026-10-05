@@ -1,6 +1,7 @@
 import Manager from "main";
 import { BPM_TAG_ID, ensureBpmTagExists } from "src/repo-resolver";
 import { normalizePath, parseYaml, stringifyYaml } from "obsidian";
+import { compareVersions } from "./version";
 
 /**
  * 单个迁移任务。
@@ -19,44 +20,6 @@ type Migration = {
 type ParsedFrontmatter = {
 	frontmatter: Record<string, unknown> | null;
 	body: string;
-};
-
-/**
- * 将版本号拆成可比较的数字段。
- *
- * 插件版本通常是 0.3.2 这种 semver-like 字符串；这里额外兼容 v0.3.2、0.3.2-beta.1
- * 这类输入，只提取每段开头的数字。无法识别的片段按 0 处理，保证比较函数稳定返回。
- */
-const parseVersionParts = (version: string): number[] => {
-	return (version || "0")
-		.replace(/^v/i, "")
-		.split(".")
-		.map((part) => {
-			const match = part.match(/^\d+/);
-			return match ? Number(match[0]) : 0;
-		});
-};
-
-/**
- * 比较两个版本号。
- *
- * 返回值：
- * - 1：a > b
- * - 0：a === b
- * - -1：a < b
- */
-const compareVersions = (a: string, b: string): number => {
-	const left = parseVersionParts(a);
-	const right = parseVersionParts(b);
-	const len = Math.max(left.length, right.length);
-
-	for (let i = 0; i < len; i++) {
-		const ai = left[i] ?? 0;
-		const bi = right[i] ?? 0;
-		if (ai > bi) return 1;
-		if (ai < bi) return -1;
-	}
-	return 0;
 };
 
 /**

@@ -1,6 +1,7 @@
 import { requireApiVersion } from "obsidian";
 import type { BetaSource } from "./data/types";
 import type { ReleaseVersion } from "./github-install";
+import { compareVersions } from "./version";
 
 export interface SourceReleaseRef {
 	tag: string;
@@ -183,19 +184,6 @@ export const markSourceInstalledRelease = (
 	source.localVersion = localVersion || source.localVersion || tag;
 };
 
-const compareVersionTags = (a = "0.0.0", b = "0.0.0"): number => {
-	const pa = a.replace(/^v/i, "").split(".").map(Number);
-	const pb = b.replace(/^v/i, "").split(".").map(Number);
-	const len = Math.max(pa.length, pb.length);
-	for (let i = 0; i < len; i++) {
-		const ai = Number.isFinite(pa[i]) ? pa[i] : 0;
-		const bi = Number.isFinite(pb[i]) ? pb[i] : 0;
-		if (ai > bi) return 1;
-		if (ai < bi) return -1;
-	}
-	return 0;
-};
-
 export const sourceUsesReleaseUpdateCheck = (source: BetaSource): boolean =>
 	source.updateCheckMode !== "version";
 
@@ -211,7 +199,7 @@ export const sourceHasVersionUpdate = (source: BetaSource): boolean => {
 	if (!sourceTargetIsMatureEnough(source)) return false;
 	return source.mode === "frozen"
 		? !releaseTagsMatch(targetVersion, localVersion)
-		: compareVersionTags(targetVersion, localVersion) > 0;
+		: compareVersions(targetVersion, localVersion) > 0;
 };
 
 export const sourceHasReleaseUpdate = (source: BetaSource): boolean => {

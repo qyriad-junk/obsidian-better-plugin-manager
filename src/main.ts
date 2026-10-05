@@ -19,6 +19,7 @@ import { ObsidianAppWithInternals, ObsidianPluginRegistry, RibbonNativeItem, Win
 import { RibbonModal } from './modal/ribbon-modal';
 import { TroubleshootModal } from './troubleshoot/troubleshoot-modal';
 import { githubProxyEnabled, resolveGithubUrl } from './github-url';
+import { compareVersions } from './version';
 
 type UpdateSource = 'official' | 'github' | 'unknown';
 interface UpdateStatus {
@@ -1062,28 +1063,6 @@ export default class Manager extends Plugin {
         return map[lower] || map[lower.split('-')[0]] || 'en';
     }
 
-    // 版本比较：>0 表示 a>b
-    private compareVersions(a = "0.0.0", b = "0.0.0"): number {
-        const normalize = (value: string) => value
-            .trim()
-            .replace(/^v(?=\d)/i, "")
-            .split(/[.+-]/)
-            .map((part) => {
-                const parsed = Number.parseInt(part, 10);
-                return Number.isFinite(parsed) ? parsed : 0;
-            });
-        const pa = normalize(a);
-        const pb = normalize(b);
-        const len = Math.max(pa.length, pb.length);
-        for (let i = 0; i < len; i++) {
-            const ai = pa[i] || 0;
-            const bi = pb[i] || 0;
-            if (ai > bi) return 1;
-            if (ai < bi) return -1;
-        }
-        return 0;
-    }
-
     private normalizePluginUpdateCheckMode(value?: string | null): PluginUpdateCheckMode {
         return value === "version" ? "version" : "release";
     }
@@ -1145,7 +1124,7 @@ export default class Manager extends Plugin {
         }
 
         st.remoteVersion = remoteFallback;
-        st.hasUpdate = remoteFallback ? this.compareVersions(remoteFallback, localVersion) > 0 : false;
+        st.hasUpdate = remoteFallback ? compareVersions(remoteFallback, localVersion) > 0 : false;
         if (!st.remoteVersion) st.message = this.translator.t("更新_未获取到远端版本");
     }
 
@@ -1284,7 +1263,7 @@ export default class Manager extends Plugin {
         if (versions.length === 0) return null;
         let latest = versions[0];
         for (const v of versions) {
-            if (this.compareVersions(v, latest) > 0) latest = v;
+            if (compareVersions(v, latest) > 0) latest = v;
         }
         return latest;
     }
