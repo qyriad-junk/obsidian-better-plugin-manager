@@ -17,6 +17,7 @@ import { RibbonItem } from './data/types';
 import { markSourceInstalledRelease, sourceHasUpdate as sourceHasConfiguredUpdate, syncSourceReleaseCheck } from './source-release';
 import { ObsidianAppWithInternals, ObsidianPluginRegistry, RibbonNativeItem, WindowWithMoment, WorkspaceWithRibbon } from './obsidian-internals';
 import { RibbonModal } from './modal/ribbon-modal';
+import { TroubleshootModal } from './troubleshoot/troubleshoot-modal';
 import { githubProxyEnabled, resolveGithubUrl } from './github-url';
 
 type UpdateSource = 'official' | 'github' | 'unknown';
@@ -181,6 +182,7 @@ export default class Manager extends Plugin {
 
     public onunload() {
         this.stopRibbonRuntimeFeatures();
+        TroubleshootModal.closeCurrent();
 
         if (this.settings.DELAY) void this.disableDelaysForAllPlugins();
 

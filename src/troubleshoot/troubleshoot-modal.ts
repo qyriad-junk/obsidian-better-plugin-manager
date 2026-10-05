@@ -11,6 +11,14 @@ import { TroubleshootAlgorithm } from './troubleshoot-algorithm';
 import { TroubleshootResultModal } from './troubleshoot-result';
 
 export class TroubleshootModal {
+    /** 同一时间只允许一个悬浮窗；重复执行命令时复用已打开的窗口。 */
+    private static current: TroubleshootModal | null = null;
+
+    /** 插件卸载时调用，避免悬浮窗残留在 DOM 中。 */
+    static closeCurrent() {
+        TroubleshootModal.current?.close();
+    }
+
     private app: App;
     private manager: Manager;
     private algorithm: TroubleshootAlgorithm;
@@ -27,6 +35,7 @@ export class TroubleshootModal {
     private isDragging = false;
     private dragOffsetX = 0;
     private dragOffsetY = 0;
+    private detachDocumentListeners: (() => void) | null = null;
 
     constructor(app: App, manager: Manager) {
         this.app = app;
@@ -48,11 +57,19 @@ export class TroubleshootModal {
             // 已经打开了
             return;
         }
+        if (TroubleshootModal.current) {
+            // 另一个实例已经打开（例如重复执行命令）
+            return;
+        }
+        TroubleshootModal.current = this;
         this.createFloatingWindow();
         void this.render();
     }
 
     close() {
+        this.detachDocumentListeners?.();
+        this.detachDocumentListeners = null;
+        if (TroubleshootModal.current === this) TroubleshootModal.current = null;
         if (this.containerEl) {
             this.containerEl.remove();
             this.containerEl = null;
@@ -120,9 +137,10 @@ export class TroubleshootModal {
             this.headerEl?.removeClass('dragging');
         };
 
+        const doc = this.containerEl.doc;
         this.headerEl.addEventListener('mousedown', onMouseDown);
-        activeDocument.addEventListener('mousemove', onMouseMove);
-        activeDocument.addEventListener('mouseup', onMouseUp);
+        doc.addEventListener('mousemove', onMouseMove);
+        doc.addEventListener('mouseup', onMouseUp);
 
         // 触摸设备支持
         this.headerEl.addEventListener('touchstart', (e) => {
@@ -134,7 +152,7 @@ export class TroubleshootModal {
             this.dragOffsetY = touch.clientY - rect.top;
         });
 
-        activeDocument.addEventListener('touchmove', (e) => {
+        const onTouchMove = (e: TouchEvent) => {
             if (!this.isDragging || !this.containerEl || e.touches.length !== 1) return;
             const touch = e.touches[0];
             this.containerEl.setCssStyles({
@@ -143,11 +161,19 @@ export class TroubleshootModal {
                 right: 'auto',
                 bottom: 'auto',
             });
-        });
-
-        activeDocument.addEventListener('touchend', () => {
+        };
+        const onTouchEnd = () => {
             this.isDragging = false;
-        });
+        };
+        doc.addEventListener('touchmove', onTouchMove);
+        doc.addEventListener('touchend', onTouchEnd);
+
+        this.detachDocumentListeners = () => {
+            doc.removeEventListener('mousemove', onMouseMove);
+            doc.removeEventListener('mouseup', onMouseUp);
+            doc.removeEventListener('touchmove', onTouchMove);
+            doc.removeEventListener('touchend', onTouchEnd);
+        };
     }
 
     private async render() {
