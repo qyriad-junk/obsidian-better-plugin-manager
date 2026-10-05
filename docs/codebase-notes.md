@@ -9,6 +9,8 @@ but they describe intent; several of their guarantees are contradicted by the co
 Claims about Obsidian's internals below were checked against Obsidian **1.13.7**'s `app.js`
 (see [Verifying Obsidian internals](#verifying-obsidian-internals)), not recalled from memory.
 
+See also [refactor-plan.md](refactor-plan.md) for the proposed untangling order.
+
 ---
 
 ## Build, tooling, state of the repo
@@ -116,6 +118,11 @@ This branching is re-implemented in several places that don't agree in the detai
 Any refactor should start by giving this one owner.
 
 ### Delay-start mechanics
+- **When the delay clock starts:** Obsidian's startup order is core plugins → community plugins (`plugins.initialize()`,
+  each `enablePlugin` awaited in turn) → `vault.load()` → `metadataCache.initialize()` → `workspace.loadLayout()` →
+  opening behavior → layout-ready (then `onLayoutReady` callbacks, one per `sleep(0)`). BPM schedules its timers in its
+  own `onload`, i.e. during the community-plugin step, *before* the vault is even loaded, so short delays fire in the
+  middle of startup. Fractional delays work (`setTimeout(time * 1000)`), but the settings slider is integer 0–100.
 - Turning delay mode **on** (`enableDelaysForAllPlugins`): for each enabled, non-ignored plugin:
   `disablePluginAndSave` (removes it from `community-plugins.json` *and unloads it*) then `enablePlugin` (reloads it in-memory).
   So every plugin gets a full unload/reload just to edit the startup list.
@@ -165,7 +172,7 @@ All undocumented, typed loosely in `src/obsidian-internals.ts` or via `@ts-ignor
 | `app.customCss.setTheme/theme/enabledSnippets` | themes & snippets pages | |
 | `app.secretStorage.get/setSecret` | GitHub token | probed defensively |
 | `app.i18n.locale`, `window.moment.locale()` | first-run language | |
-| `workspace.leftRibbon.items` | ribbon manager | items are `{id, icon, title, callback, hidden, buttonEl}`; native order/hidden persist in `workspace.json` `left-ribbon.hiddenItems` (key order = order); `addRibbonItemButton` updates an existing id **in place** |
+| `workspace.leftRibbon.items` | ribbon manager | items are `{id, icon, title, callback, hidden, buttonEl}`; native order/hidden persist in `workspace.json` `left-ribbon.hiddenItems` (key order = order); `addRibbonItemButton` updates an existing id **in place**, otherwise appends `{hidden: false}`; `load(hiddenItems)` only applies hidden/order to items that **already exist** |
 
 Consequences worth internalising:
 - Writing `community-plugins.json` directly (self-check takeover) leaves Obsidian's in-memory `enabledPlugins` stale, so the
@@ -174,6 +181,9 @@ Consequences worth internalising:
 - Plugins started by BPM's delay mode are not in `enabledPlugins`, so they **never get `onConfigFileChange()`** (e.g. when
   Obsidian Sync updates their `data.json`). That's a real, undocumented cost of delay mode.
 - Editing the startup list doesn't require reloading plugins at all (see the delay toggle above).
+- **Why hidden ribbon icons of delay-loaded plugins come back** (any lazy loader, not just BPM): at layout load the
+  plugin's ribbon item doesn't exist yet, so `leftRibbon.load()` skips its saved `hidden: true`; when the plugin later
+  calls `addRibbonIcon`, a fresh visible item is appended at the end, and the next layout save persists it as visible.
 
 ### Verifying Obsidian internals
 ```sh
@@ -267,44 +277,40 @@ Dynamic (opt-in): per-plugin toggle `manager-<id>`, per-group `manager-<gid>-ena
 Ranked roughly by user impact. [C] = confirmed by reading code (and Obsidian source where relevant).
 [L] = very likely from code + Obsidian source, but *(runtime-unverified)*.
 
-### Correctness
-1. [C] **Every confirm dialog's title is the raw key `通用_确认_文本`.** The key is undefined in all locales and all 14
-   `confirmWithModal` callers pass a bare string (`src/utils.ts`). The confirm button text defaults to untranslated `"OK"`.
-2. [L] **Brand-new GitHub installs aren't actually enabled.** `installPluginFromGithub` calls `enablePluginAndSave` *before*
+### Fixed on `fix/trivial-bugs` (2026-10-05)
+Confirm dialogs' raw-key title and "OK" label · NoteTip title always Chinese, panel not dismissable · Ctrl+F listener
+leaked per manager open, `managerModal` never cleared · troubleshoot windows stacking and leaking document listeners ·
+startup update-check notice stuck on throw · redundant settings re-renders · unsafe remote manifest ids/names used as
+folders · protocol handler crash without `enable` · self-check takeover silently undone (now updates
+`enabledPlugins` + `saveConfig()`) · troubleshoot undo (now full-state snapshots; verified by simulation) and 0–2-plugin
+sessions · three non-semver version comparators (now `src/version.ts`).
+
+### Correctness (open)
+1. [L] **Brand-new GitHub installs aren't actually enabled.** `installPluginFromGithub` calls `enablePluginAndSave` *before*
    `loadManifests()`; for a new plugin `manifests[id]` is absent, so Obsidian's `enablePlugin` returns `false`, but BPM's
    record is set to `enabled: true`.
-3. [C] **Installing/updating force-enables plugins.** Every install/update ends in `enablePluginAndSave` + `enabled = true`,
+2. [C] **Installing/updating force-enables plugins.** Every install/update ends in `enablePluginAndSave` + `enabled = true`,
    including "download update" on a disabled plugin and **startup auto-update of tracked sources**.
-4. [C] **Install/update ignores delay mode.** `enablePluginAndSave` puts the plugin back into `community-plugins.json` → takeover nag next start.
-5. [C] **Self-check takeover is undone silently** by the next `*AndSave` anywhere (stale in-memory `enabledPlugins`, see internals).
-6. [C] **Conflict-diagnosis undo is broken.** `undo()` restores the plugin set and `suspectPool` (unused by the current
-   algorithm) but not `algorithmState`, so the next answer is applied to the wrong stage. In the cross-pair stages, the
-   history records `searchSet` as "previously enabled", but `fixedSet + searchHalf` was actually enabled. Fix: snapshot the
-   whole (JSON-cloneable) `algorithmState` into each history item.
-7. [C] Conflict diagnosis with 0 or 1 enabled plugins never reaches a terminal case (bisects empty sets).
-8. [C] **Transfer-pack import ignores delay mode.** `wasEnabled = enabledPlugins.has(id)` is false for BPM-started plugins, so
+3. [C] **Install/update ignores delay mode.** `enablePluginAndSave` puts the plugin back into `community-plugins.json` → takeover nag next start.
+4. [C] **Transfer-pack import ignores delay mode.** `wasEnabled = enabledPlugins.has(id)` is false for BPM-started plugins, so
    config import writes `data.json` under a *running* plugin (which may overwrite it on its next `saveData`), and
    `applyEnabledState` uses `*AndSave`. `applyWorkspaceSettings` flips `DELAY` without running the delay on/off transition.
-9. [C] `NoteTip` tooltip title is always Chinese for non-Chinese users: `DEFAULT_NOTE_TIP.title = "📌 插件备注"` is merged in by
-   `loadCfg`, so `cfg.title || t(...)` never falls through to the translation. Its config panel doesn't close on Escape/outside click.
-10. [C] `ManagerModal.openAsync` adds a global `keydown` (Ctrl+F) listener on every open and never removes it (leak).
-    `manager.managerModal` is never cleared on close.
-11. [C] `agreement.ts`: `params.enable.toLowerCase()` throws when `enable` is absent; the parsed `github` param is never
-    passed through.
-12. [C] Three version comparators (`main.ts compareVersions`, `migrations.ts`, `source-release.ts compareVersionTags`) with
-    different rules, none semver-correct: `1.0.0-beta.1` compares *greater* than `1.0.0`.
-13. [C] Running the troubleshoot command twice stacks two floating windows; they're hand-built DOM, not torn down on unload.
+5. [C] Delay timers start during community-plugin init, before vault/layout load (see *Delay-start mechanics*).
+6. [C] Hidden ribbon icons of delay-loaded plugins reappear (native `leftRibbon.load` behaviour, see internals); BPM's
+   own ribbon manager matches by aria-label text and doesn't address it.
+7. [C] Entering edit mode re-renders the whole plugin page (`renderContent()` → `pageEl.empty()`), losing scroll; edit-mode
+   cards have no enable toggle; the context menu has no enable/disable or delay actions.
 
-### Security / trust
-- [C] `obsidian://BPM-plugin-install?id=<community id>&enable=true` installs **and enables** a plugin with no confirmation UI.
-- [C] Remote `manifest.id` / theme `manifest.name` go into filesystem paths unchecked in `github-install.ts`
-  (`import-export.ts`'s `getSafePluginId` exists but isn't reused).
+### Security / trust (open)
+- [C] `obsidian://BPM-plugin-install?id=<community id>&enable=true` installs **and enables** a plugin with no
+  confirmation UI. (The parsed `github` param is intentionally still not passed through until there is one.)
 
 ### Performance
 - [C] `Agreement`'s constructor downloads the full community plugin list on every startup (unconditional network);
   `RepoResolver` separately fetches and caches the same list.
 - [C] Delay on/off reloads every plugin twice over; editing the startup set needs no reloads.
 - [C] Update checks are sequential per plugin and fetch a manifest for every release of every plugin.
+- [C] All delayed plugins with the same delay are started at once (one timer each), not sequentially.
 
 ### Structure / smells
 - Enable-state logic duplicated ~6× (see above). `manager-modal.ts` is an 8k-line god object.
@@ -314,14 +320,10 @@ Ranked roughly by user impact. [C] = confirmed by reading code (and Obsidian sou
   doesn't exist), `applyRibbonConfigToMemory` ignores its arguments, `savePluginAndExport` is just `saveSettings`.
 - Upstream branding baked in: `bpm-eondr-plugin` auto-tag, hardcoded QQ support-group link (`SUPPORT_QQ_GROUP_URL`),
   Afdian funding link, bilibili tutorial link.
-- `ManagerBasis` language change / delay toggle call `render()` on a container that `renderSettings()` just detached.
-
----
 
 ## Open questions
 
-- How much of the ribbon manager is redundant with Obsidian's native ribbon order/hide persistence (which is keyed by id and
-  keeps slots for late-registering plugins)? Needs a runtime test with delay-started plugins.
+- Answered: native ribbon persistence does *not* survive lazy loading (see internals); the fix is to re-apply it by id.
 - Does `require("electron")` (top-level import in `utils.ts`) behave on mobile? The plugin claims mobile support, so presumably
   it resolves harmlessly, but nothing in the code guards it.
 - Is the delay-start feature still worth its costs (no `onConfigFileChange`, takeover dance, two enable-state models), or
