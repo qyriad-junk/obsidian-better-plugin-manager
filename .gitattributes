@@ -1,0 +1,5 @@
+# Store and check out all text files with LF line endings (matches .editorconfig).
+# Without this, upstream files accumulated a mix of CRLF and LF lines.
+* text=auto eol=lf
+
+*.png binary
