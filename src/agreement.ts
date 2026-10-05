@@ -144,10 +144,12 @@ export default class Agreement {
      */
     public async parsePluginInstall(params: ObsidianProtocolData) {
         // 解析参数，设置默认值
+        // `enable` 缺省时视为不启用；`?enable`、`enable=true`、`enable=1` 表示启用。
+        const enableParam = params.enable as string | undefined;
         const args = {
             id: params.id,
             version: params?.version ?? "",
-            enable: ["", "true", "1"].includes(params.enable.toLowerCase()),
+            enable: enableParam !== undefined && ["", "true", "1"].includes(enableParam.toLowerCase()),
             github: params.github ?? "",
         };
         // 调用 installPlugin 方法安装插件
