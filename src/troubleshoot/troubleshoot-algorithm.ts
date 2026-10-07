@@ -41,35 +41,17 @@ export class TroubleshootAlgorithm {
         this.bpmId = manager.manifest.id; 
     }
 
+    /** Installed plugins taking part in troubleshooting: everything except BPM itself. */
+    private getCandidatePlugins(): string[] {
+        return Object.keys(this.getAllManifests())
+            .filter((id) => id !== this.bpmId && !CORE_PLUGINS_EXCLUDE.includes(id));
+    }
+
     /**
      * 获取当前启用的插件列表（排除核心插件）
      */
     getEnabledPlugins(): string[] {
-        const enabled: string[] = [];
-        const settings = this.manager.settings;
-
-        // @ts-ignore
-        const manifests = this.app.plugins.manifests as Record<string, PluginManifest>;
-
-        if (settings.DELAY) {
-            for (const mp of settings.Plugins) {
-                if (!manifests[mp.id]) continue;
-                if (mp.id === this.bpmId || CORE_PLUGINS_EXCLUDE.includes(mp.id)) continue;
-                if (mp.enabled) {
-                    enabled.push(mp.id);
-                }
-            }
-        } else {
-            // @ts-ignore
-            const appPlugins = this.app.plugins;
-            for (const id of appPlugins.enabledPlugins) {
-                if (!manifests[id]) continue;
-                if (id === this.bpmId || CORE_PLUGINS_EXCLUDE.includes(id)) continue;
-                enabled.push(id);
-            }
-        }
-
-        return enabled;
+        return this.getCandidatePlugins().filter((id) => this.manager.pluginStartup.isWanted(id));
     }
 
     /**
@@ -84,46 +66,17 @@ export class TroubleshootAlgorithm {
      * 启用指定插件集合（禁用其他所有插件）
      */
     async setEnabledPlugins(pluginsToEnable: string[]): Promise<void> {
-        const settings = this.manager.settings;
-        // @ts-ignore
-        const appPlugins = this.app.plugins;
-        // @ts-ignore
-        const manifests = this.app.plugins.manifests as Record<string, PluginManifest>;
-
+        // Wanted state is persisted, so each step survives restarting Obsidian (which troubleshooting asks for).
+        // Not user-initiated: switching plugins off here shouldn't close their panes.
         const enableSet = new Set(pluginsToEnable);
-
-        // 遍历所有插件，启用/禁用
-        for (const id of Object.keys(manifests)) {
-            if (id === this.bpmId) continue; // 不动 BPM 自身
-
+        const states: Record<string, boolean> = {};
+        for (const id of this.getCandidatePlugins()) {
             const shouldEnable = enableSet.has(id);
-
-            if (settings.DELAY) {
-                const mp = settings.Plugins.find(p => p.id === id);
-                if (mp) {
-                    if (shouldEnable && !mp.enabled) {
-                        mp.enabled = true;
-                        await appPlugins.enablePlugin(id);
-                    } else if (!shouldEnable && mp.enabled) {
-                        mp.enabled = false;
-                        await appPlugins.disablePlugin(id);
-                    }
-                }
-            } else {
-                const isCurrentlyEnabled = appPlugins.enabledPlugins.has(id);
-                if (shouldEnable && !isCurrentlyEnabled) {
-                    await appPlugins.enablePluginAndSave(id);
-                    const mp = settings.Plugins.find(p => p.id === id);
-                    if (mp) mp.enabled = true;
-                } else if (!shouldEnable && isCurrentlyEnabled) {
-                    await appPlugins.disablePluginAndSave(id);
-                    const mp = settings.Plugins.find(p => p.id === id);
-                    if (mp) mp.enabled = false;
-                }
+            if (this.manager.pluginStartup.isWanted(id) !== shouldEnable || this.manager.pluginStartup.isLoaded(id) !== shouldEnable) {
+                states[id] = shouldEnable;
             }
         }
-
-        await this.manager.saveSettings();
+        await this.manager.pluginStartup.setWantedMany(states);
     }
 
     /**

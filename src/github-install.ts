@@ -279,7 +279,6 @@ const upsertInstalledPluginRecord = (
 	if (plugin) {
 		plugin.name = nextName;
 		plugin.desc = nextDesc || plugin.desc;
-		plugin.enabled = true;
 		if (shouldHaveBpmTag && !plugin.tags.includes(BPM_TAG_ID)) plugin.tags.push(BPM_TAG_ID);
 		manager.applySpecialPluginTags(plugin);
 		return;
@@ -291,7 +290,7 @@ const upsertInstalledPluginRecord = (
 		desc: nextDesc,
 		group: "",
 		tags: shouldHaveBpmTag ? [BPM_TAG_ID] : [],
-		enabled: true,
+		enabled: manager.pluginStartup.isWanted(pluginId),
 		delay: "",
 		note: "",
 	};
@@ -420,11 +419,17 @@ export const fetchReleaseVersions = async (
  * - 网络下载和文件写入都尽量并行，减少安装等待时间。
  * - 安装后只更新当前插件的 BPM 记录，避免触发全量插件笔记导出。
  */
+export interface InstallPluginOptions {
+	/** For a plugin that wasn't installed before: should it be turned on? Default true. Updates keep their state. */
+	wantedIfNew?: boolean;
+}
+
 export const installPluginFromGithub = async (
 	manager: Manager,
 	repoInput: string,
 	version?: string,
-	markAsBpm = true
+	markAsBpm = true,
+	options: InstallPluginOptions = {}
 ): Promise<boolean> => {
 	try {
 		const repo = sanitizeRepo(repoInput);
@@ -501,19 +506,17 @@ export const installPluginFromGithub = async (
 		if (files.styles) writes.push(adapter.write(`${pluginPath}styles.css`, files.styles));
 		await Promise.all(writes);
 
-		try {
-			await manager.appPlugins.disablePlugin(manifest.id);
-		} catch {
-			// The plugin may not be enabled yet; enabling below is still the desired final state.
-		}
-		await manager.appPlugins.enablePluginAndSave(manifest.id);
-
 		if (markAsBpm && !manager.settings.BPM_INSTALLED.includes(manifest.id)) {
 			manager.settings.BPM_INSTALLED.push(manifest.id);
 		}
-
 		await manager.repoResolver.setRepo(manifest.id, repo);
-		await manager.appPlugins.loadManifests();
+
+		// Reads the new manifest first, then: a fresh install is turned on (unless wantedIfNew is false); an update
+		// keeps its on/off state and is reloaded only if it was running.
+		const ok = await manager.pluginStartup.applyInstalledFiles(manifest.id, { wantedIfNew: options.wantedIfNew });
+		if (!ok) {
+			new Notice(manager.translator.t("安装_错误_无法启用", { name: manifest.name || manifest.id }));
+		}
 
 		const loadedManifest = (manager.appPlugins.manifests as Record<string, PluginManifest | undefined>)[manifest.id];
 		upsertInstalledPluginRecord(manager, manifest, loadedManifest, markAsBpm);

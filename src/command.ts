@@ -81,22 +81,17 @@ class ManagerCommandService {
     }
 
     isPluginEnabled(pluginId: string): boolean {
-        const managerPlugin = this.getManagerPlugin(pluginId);
-        if (this.manager.settings.DELAY && managerPlugin && !managerPlugin.tags.includes(BPM_IGNORE_TAG)) {
-            return managerPlugin.enabled;
-        }
-        return this.manager.appPlugins.enabledPlugins.has(pluginId);
+        return this.manager.pluginStartup.isWanted(pluginId);
     }
 
+    /** BPM controls it: not BPM itself, installed, and not tagged bpm-ignore. */
     isActionablePlugin(pluginId: string): boolean {
-        if (pluginId === this.manager.manifest.id) return false;
-        if (!this.manager.appPlugins.manifests[pluginId]) return false;
-        const managerPlugin = this.getManagerPlugin(pluginId);
-        return !managerPlugin?.tags?.includes(BPM_IGNORE_TAG);
+        return this.manager.pluginStartup.isManaged(pluginId) && this.manager.pluginStartup.isInstalled(pluginId);
     }
 
     getPluginActions(pluginId: string): PluginAction[] {
         const enabled = this.isPluginEnabled(pluginId);
+        const loaded = this.manager.pluginStartup.isLoaded(pluginId);
         const isActionable = this.isActionablePlugin(pluginId);
         return [
             {
@@ -113,15 +108,16 @@ class ManagerCommandService {
                 id: "single-start",
                 label: this.t("command_action_single_start"),
                 icon: "repeat-1",
-                disabled: this.manager.settings.DELAY || !isActionable || enabled,
+                disabled: !isActionable || loaded,
             },
             {
                 id: "restart",
                 label: this.t("command_action_restart"),
                 icon: "refresh-ccw",
-                disabled: this.manager.settings.DELAY || !isActionable || !enabled,
+                disabled: !isActionable || !loaded,
             },
-            { id: "open-settings", label: this.t("command_action_open_settings"), icon: "settings", disabled: !enabled },
+            // A plugin's settings tab only exists while it's running.
+            { id: "open-settings", label: this.t("command_action_open_settings"), icon: "settings", disabled: !loaded },
             { id: "open-dir", label: this.t("command_action_open_dir"), icon: "folder-open" },
             { id: "open-repo", label: this.t("command_action_open_repo"), icon: "github" },
             { id: "copy-id", label: this.t("command_action_copy_id"), icon: "copy" },
@@ -177,8 +173,8 @@ class ManagerCommandService {
         }
         await this.runLocked(`plugin:${pluginId}`, async () => {
             this.capturePreviousState(this.t("command_snapshot_plugin", { name: this.getPluginName(pluginId) }));
-            const changed = await this.setPluginEnabledInternal(pluginId, targetEnabled);
-            await this.manager.saveSettings();
+            const changed = this.isPluginEnabled(pluginId) !== targetEnabled
+                && await this.manager.pluginStartup.setWanted(pluginId, targetEnabled, { userInitiated: true });
             if (changed) {
                 this.refreshAfterStatusChange([pluginId]);
                 new Notice(targetEnabled
@@ -412,71 +408,42 @@ class ManagerCommandService {
         await this.runLocked(`bulk:${label}`, async () => {
             this.capturePreviousState(restoring ? this.t("command_snapshot_before_restore") : label);
             const progress = new Notice(`${this.t("command_notice_applying")} 0/${entries.length}`, 0);
-            let changedCount = 0;
             let processed = 0;
-            const changedIds: string[] = [];
+            const toChange = Object.fromEntries(entries.filter(([pluginId, targetEnabled]) => this.isPluginEnabled(pluginId) !== targetEnabled));
+            let changedIds: string[] = [];
             try {
-                for (const [pluginId, targetEnabled] of entries) {
-                    const changed = await this.setPluginEnabledInternal(pluginId, targetEnabled);
-                    if (changed) {
-                        changedCount++;
-                        changedIds.push(pluginId);
-                    }
+                changedIds = await this.manager.pluginStartup.setWantedMany(toChange, { userInitiated: true }, (pluginId) => {
                     processed++;
-                    progress.setMessage(`${this.t("command_notice_applying")} ${processed}/${entries.length} · ${pluginId}`);
-                }
+                    progress.setMessage(`${this.t("command_notice_applying")} ${processed}/${Object.keys(toChange).length} · ${pluginId}`);
+                });
             } finally {
                 progress.hide();
             }
-            await this.manager.saveSettings();
             this.refreshAfterStatusChange(changedIds);
-            new Notice(this.t("command_notice_bulk_done", { count: changedCount }));
+            new Notice(this.t("command_notice_bulk_done", { count: changedIds.length }));
         });
     }
 
-    private async setPluginEnabledInternal(pluginId: string, targetEnabled: boolean): Promise<boolean> {
-        const current = this.isPluginEnabled(pluginId);
-        const managerPlugin = this.getManagerPlugin(pluginId);
-        if (current === targetEnabled) {
-            if (managerPlugin) managerPlugin.enabled = targetEnabled;
-            return false;
-        }
-
-        if (this.manager.settings.DELAY && managerPlugin && !managerPlugin.tags.includes(BPM_IGNORE_TAG)) {
-            managerPlugin.enabled = targetEnabled;
-            if (targetEnabled) await this.manager.appPlugins.enablePlugin(pluginId);
-            else await this.manager.appPlugins.disablePlugin(pluginId);
-        } else {
-            if (targetEnabled) await this.manager.appPlugins.enablePluginAndSave(pluginId);
-            else await this.manager.appPlugins.disablePluginAndSave(pluginId);
-            if (managerPlugin) managerPlugin.enabled = targetEnabled;
-        }
-        return true;
-    }
-
     private async singleStartPlugin(pluginId: string) {
-        if (this.manager.settings.DELAY || !this.isActionablePlugin(pluginId) || this.isPluginEnabled(pluginId)) return;
+        if (!this.isActionablePlugin(pluginId) || this.manager.pluginStartup.isLoaded(pluginId)) return;
         await this.runLocked(`single:${pluginId}`, async () => {
-            this.capturePreviousState(this.t("command_snapshot_single_start", { name: this.getPluginName(pluginId) }));
             new Notice(this.manager.translator.t("管理器_单次启动中_提示"));
-            await this.manager.appPlugins.enablePlugin(pluginId);
+            await this.manager.pluginStartup.startOnce(pluginId);
             this.refreshAfterStatusChange([pluginId]);
         });
     }
 
     private async restartPlugin(pluginId: string) {
-        if (this.manager.settings.DELAY || !this.isActionablePlugin(pluginId) || !this.isPluginEnabled(pluginId)) return;
+        if (!this.isActionablePlugin(pluginId) || !this.manager.pluginStartup.isLoaded(pluginId)) return;
         await this.runLocked(`restart:${pluginId}`, async () => {
-            this.capturePreviousState(this.t("command_snapshot_restart", { name: this.getPluginName(pluginId) }));
             new Notice(this.manager.translator.t("管理器_重启中_提示"));
-            await this.manager.appPlugins.disablePluginAndSave(pluginId);
-            await this.manager.appPlugins.enablePluginAndSave(pluginId);
+            await this.manager.pluginStartup.restart(pluginId);
             this.refreshAfterStatusChange([pluginId]);
         });
     }
 
     private async openPluginSettings(pluginId: string) {
-        if (!this.isPluginEnabled(pluginId)) {
+        if (!this.manager.pluginStartup.isLoaded(pluginId)) {
             new Notice(this.t("command_notice_enable_before_settings"));
             return;
         }

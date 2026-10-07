@@ -125,16 +125,13 @@ export default class Agreement {
             if (version.toLowerCase() === "latest" || version === "") version = manifest.version;
             // 调用插件注册表的 installPlugin 方法安装插件
             await pluginRegistry.installPlugin(repo, version, manifest);
+            // A fresh install is turned on only if the link asked for it; an update keeps its on/off state.
+            await this.plugin.pluginStartup.applyInstalledFiles(id, { wantedIfNew: enable });
         }
 
-        // 根据 enable 参数决定是否启用或禁用插件
-        if (enable) {
-            // 启用插件
-            await pluginRegistry.loadPlugin(id);
-            await pluginRegistry.enablePluginAndSave(id);
-        } else {
-            // 禁用插件
-            await pluginRegistry.disablePlugin(id);
+        // enable=true also turns on an already-installed plugin. (enable=false never turns anything off.)
+        if (enable && !this.plugin.pluginStartup.isWanted(id)) {
+            await this.plugin.pluginStartup.setWanted(id, true, { userInitiated: true });
         }
     }
 

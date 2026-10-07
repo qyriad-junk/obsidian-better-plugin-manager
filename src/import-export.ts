@@ -943,7 +943,8 @@ const upsertPluginRecord = (
 			desc: manifest?.description || plugin.description || plugin.customDescription || "",
 			group: "",
 			tags: [],
-			enabled: Boolean(plugin.enabled),
+			// On/off is PluginStartup's business (and only taken from the package if the import applies enabled states).
+			enabled: manager.pluginStartup.isWanted(plugin.id),
 			delay: "",
 			note: "",
 		};
@@ -970,14 +971,6 @@ const getPackageVersionForInstall = (
 	return source?.frozenVersion || version || undefined;
 };
 
-const setPluginEnabled = async (manager: Manager, pluginId: string, enabled: boolean): Promise<void> => {
-	if (pluginId === manager.manifest.id) return;
-	if (enabled) {
-		await manager.appPlugins.enablePluginAndSave(pluginId);
-	} else {
-		await manager.appPlugins.disablePluginAndSave(pluginId);
-	}
-};
 
 export const applyManagerTransferPackage = async (
 	manager: Manager,
@@ -1016,7 +1009,8 @@ export const applyManagerTransferPackage = async (
 	if (options.applyWorkspaceSettings && transferPackage.data.workspaceSettings) {
 		const workspace = transferPackage.data.workspaceSettings;
 		manager.settings.PERSISTENCE = workspace.persistence;
-		manager.settings.DELAY = workspace.delayMode;
+		// Switching delay mode has to rewrite Obsidian's startup list, not just flip the flag.
+		if (manager.settings.DELAY !== Boolean(workspace.delayMode)) await manager.pluginStartup.setDelayMode(Boolean(workspace.delayMode));
 		manager.settings.HIDE_BPM_TAG = workspace.hideBpmTag;
 		manager.settings.STARTUP_CHECK_UPDATES = workspace.startupCheckUpdates;
 		manager.settings.PLUGIN_OVERVIEW_LAYOUT = workspace.pluginOverviewLayout === "two-column"
@@ -1066,9 +1060,9 @@ export const applyManagerTransferPackage = async (
 
 		const repo = cleanRepo(plugin.repo);
 		const wasInstalled = Boolean(manager.appPlugins.manifests[plugin.id]);
-		const wasEnabled = manager.appPlugins.enabledPlugins.has(plugin.id);
 		let installed = wasInstalled;
-		let restoredFromBundle = false;
+		// A plugin new to this vault is only turned on if the import applies enabled states (handled below).
+		const wantedIfNew = options.applyEnabledState ? Boolean(plugin.enabled) : false;
 
 		if (!installed && hasPluginFileBundle(plugin) && !options.installMissing) {
 			result.skippedPlugins++;
@@ -1078,27 +1072,13 @@ export const applyManagerTransferPackage = async (
 
 		if (hasPluginFileBundle(plugin)) {
 			try {
-				if (wasEnabled) {
-					try {
-						await manager.appPlugins.disablePlugin(plugin.id);
-					} catch {
-						// The plugin may not currently be loaded even if Obsidian remembers it as enabled.
-					}
-				}
 				await writePluginFileBundle(manager, plugin);
-				await manager.appPlugins.loadManifests();
+				// Reads the new manifest; an already-installed plugin keeps its on/off state and is reloaded if running.
+				await manager.pluginStartup.applyInstalledFiles(plugin.id, { wantedIfNew });
 				installed = Boolean(manager.appPlugins.manifests[plugin.id]);
 				if (!installed) throw new Error("Plugin files were written, but Obsidian did not load the manifest.");
-				restoredFromBundle = true;
 				if (!wasInstalled) result.installedPlugins++;
 			} catch (error) {
-				if (wasEnabled) {
-					try {
-						await manager.appPlugins.enablePlugin(plugin.id);
-					} catch {
-						// Best-effort runtime restore only.
-					}
-				}
 				result.failedPlugins.push({
 					id: plugin.id,
 					name: plugin.name,
@@ -1109,18 +1089,10 @@ export const applyManagerTransferPackage = async (
 			}
 		} else if (!installed && options.installMissing && repo) {
 			const version = getPackageVersionForInstall(options.installVersionStrategy, plugin.version, plugin.source);
-			const ok = await installPluginFromGithub(manager, repo, version, options.applySources && plugin.installedViaBpm);
-			await manager.appPlugins.loadManifests();
+			const ok = await installPluginFromGithub(manager, repo, version, options.applySources && plugin.installedViaBpm, { wantedIfNew });
 			installed = Boolean(manager.appPlugins.manifests[plugin.id]);
 			if (ok && installed) {
 				result.installedPlugins++;
-				if (!options.applyEnabledState) {
-					try {
-						await manager.appPlugins.disablePluginAndSave(plugin.id);
-					} catch {
-						// Keep import moving; record.enabled is synced below from runtime state.
-					}
-				}
 			} else {
 				result.failedPlugins.push({
 					id: plugin.id,
@@ -1145,32 +1117,16 @@ export const applyManagerTransferPackage = async (
 			continue;
 		}
 
-		if (restoredFromBundle && !options.applyEnabledState && wasEnabled) {
-			try {
-				await manager.appPlugins.enablePlugin(plugin.id);
-			} catch (error) {
-				result.failedPlugins.push({
-					id: plugin.id,
-					name: plugin.name,
-					reason: (error as Error)?.message || "Failed to reload plugin after restoring files.",
-				});
-			}
-		}
-
 		if (repo && options.applySources) await manager.repoResolver.setRepo(plugin.id, repo);
 		const manifest = manager.appPlugins.manifests[plugin.id] as PluginManifest | undefined;
-		const record = upsertPluginRecord(manager, plugin, manifest, options.applyPluginMetadata);
-		if (!options.applyEnabledState) {
-			record.enabled = manager.appPlugins.enabledPlugins.has(plugin.id);
-		}
+		upsertPluginRecord(manager, plugin, manifest, options.applyPluginMetadata);
 		if (options.applySources && plugin.installedViaBpm && !manager.settings.BPM_INSTALLED.includes(plugin.id)) {
 			manager.settings.BPM_INSTALLED.push(plugin.id);
 		}
 
-		if (options.applyEnabledState) {
-			record.enabled = Boolean(plugin.enabled);
+		if (options.applyEnabledState && plugin.id !== manager.manifest.id) {
 			try {
-				await setPluginEnabled(manager, plugin.id, Boolean(plugin.enabled));
+				await manager.pluginStartup.setWanted(plugin.id, Boolean(plugin.enabled));
 			} catch (error) {
 				result.failedPlugins.push({
 					id: plugin.id,
@@ -1278,32 +1234,12 @@ export const applyManagerTransferPackage = async (
 				continue;
 			}
 
-			const wasEnabled = manager.appPlugins.enabledPlugins.has(config.id);
 			try {
-				if (wasEnabled) {
-					try {
-						await manager.appPlugins.disablePlugin(config.id);
-					} catch {
-						// Keep import moving; the file write below is still safe.
-					}
-				}
-				await writePluginConfigFile(manager, config);
-				if (wasEnabled) {
-					try {
-						await manager.appPlugins.enablePlugin(config.id);
-					} catch (error) {
-						throw new Error((error as Error)?.message || "Config was written, but the plugin could not be reloaded.");
-					}
-				}
+				// If the plugin is running, unload it while its data.json is replaced (so it can't save its old
+				// settings over the new ones) and load it again afterwards.
+				await manager.pluginStartup.whileUnloaded(config.id, () => writePluginConfigFile(manager, config));
 				result.appliedPluginConfigs++;
 			} catch (error) {
-				if (wasEnabled) {
-					try {
-						await manager.appPlugins.enablePlugin(config.id);
-					} catch {
-						// Best-effort runtime restore only.
-					}
-				}
 				result.failedPluginConfigs.push({
 					id: config.id,
 					name: config.name,

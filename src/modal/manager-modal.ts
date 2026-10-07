@@ -368,7 +368,6 @@ export class ManagerModal extends Modal {
     private searchIndex = new Map<string, PluginSearchIndexEntry>();
     private pluginCardControllers = new Map<string, PluginCardController>();
     private bulkBarHostEl?: HTMLElement;
-    private singleStartedPluginIds = new Set<string>();
     private expandedSourceConfigKeys = new Set<string>();
     private pluginManifestCache?: { source: Record<string, PluginManifest>; plugins: PluginManifest[] };
     private modalChromeEl?: HTMLElement;
@@ -1299,26 +1298,13 @@ export class ManagerModal extends Modal {
         return this.manager.settings.Plugins.find((plugin) => plugin.id === pluginId);
     }
 
-    private hasLoadedPluginInstance(pluginId: string): boolean {
-        const plugins = (this.appPlugins as { plugins?: Record<string, unknown> | Map<string, unknown> }).plugins;
-        if (plugins instanceof Map) return plugins.has(pluginId);
-        if (plugins && typeof plugins === "object" && Boolean(plugins[pluginId])) return true;
-
-        const getPlugin = (this.appPlugins as { getPlugin?: (id: string) => unknown }).getPlugin;
-        if (typeof getPlugin !== "function") return false;
-        try {
-            return Boolean(getPlugin.call(this.appPlugins, pluginId));
-        } catch {
-            return false;
-        }
+    /** On if the plugin is wanted (see PluginStartup), or running anyway (e.g. started once). */
+    private isPluginEnabledForDisplay(pluginId: string, _managerPlugin?: ManagerPlugin): boolean {
+        return this.manager.pluginStartup.isWanted(pluginId) || this.manager.pluginStartup.isLoaded(pluginId);
     }
 
-    private isPluginEnabledForDisplay(pluginId: string, managerPlugin?: ManagerPlugin): boolean {
-        const pluginSettings = managerPlugin ?? this.getManagerPlugin(pluginId);
-        if (this.settings.DELAY && !pluginSettings?.tags?.includes(BPM_IGNORE_TAG)) return Boolean(pluginSettings?.enabled);
-        return this.appPlugins.enabledPlugins.has(pluginId)
-            || this.singleStartedPluginIds.has(pluginId)
-            || this.hasLoadedPluginInstance(pluginId);
+    private isPluginLoaded(pluginId: string): boolean {
+        return this.manager.pluginStartup.isLoaded(pluginId);
     }
 
     private pluginMatchesCurrentView(managerPlugin: ManagerPlugin, manifest: PluginManifest, isEnabled: boolean): boolean {
@@ -1390,12 +1376,13 @@ export class ManagerModal extends Modal {
 
         controller?.syncToggleValue?.(isSelf ? true : isEnabled);
         controller?.toggleSwitch?.setDisabled(isSelf);
-        controller?.singleStartButton?.setDisabled(isSelf || isEnabled);
-        controller?.restartButton?.setDisabled(isSelf || !isEnabled);
+        controller?.singleStartButton?.setDisabled(isSelf || this.isPluginLoaded(pluginId));
+        controller?.restartButton?.setDisabled(isSelf || !this.isPluginLoaded(pluginId));
         controller?.enableIgnoredButton?.setDisabled(isSelf || !managerPlugin.tags.includes(BPM_IGNORE_TAG));
         if (controller?.openPluginSetting) {
-            controller.openPluginSetting.setDisabled(!isEnabled);
-            controller.openPluginSettingEl?.classList.toggle("manager-display-none", !isEnabled);
+            // A plugin's settings tab only exists while it's running.
+            controller.openPluginSetting.setDisabled(!this.isPluginLoaded(pluginId));
+            controller.openPluginSettingEl?.classList.toggle("manager-display-none", !this.isPluginLoaded(pluginId));
         }
 
         const title = card.querySelector<HTMLElement>(".manager-item__name-title");
@@ -1621,26 +1608,20 @@ export class ManagerModal extends Modal {
 
     private async singleStartPlugin(plugin: PluginManifest) {
         new Notice(this.manager.translator.t("管理器_单次启动中_提示"));
-        await this.appPlugins.enablePlugin(plugin.id);
-        this.singleStartedPluginIds.add(plugin.id);
+        await this.manager.pluginStartup.startOnce(plugin.id);
         this.refreshPluginCard(plugin.id, { allowReload: true });
     }
 
     private async restartPlugin(plugin: PluginManifest) {
         new Notice(this.manager.translator.t("管理器_重启中_提示"));
-        await this.appPlugins.disablePluginAndSave(plugin.id);
-        await this.appPlugins.enablePluginAndSave(plugin.id);
-        this.singleStartedPluginIds.delete(plugin.id);
+        await this.manager.pluginStartup.restart(plugin.id);
         this.refreshPluginCard(plugin.id, { allowReload: true });
     }
 
     private async enableBpmIgnoredPlugin(plugin: PluginManifest, managerPlugin: ManagerPlugin) {
         if (!managerPlugin.tags.includes(BPM_IGNORE_TAG)) return;
-        managerPlugin.enabled = this.isPluginEnabledForDisplay(plugin.id, managerPlugin);
-        managerPlugin.tags = managerPlugin.tags.filter((tag) => tag !== BPM_IGNORE_TAG);
+        await this.manager.pluginStartup.setIgnored(plugin.id, false);
         this.manager.applySpecialPluginTags(managerPlugin);
-        await this.manager.savePluginAndExport(plugin.id);
-        this.singleStartedPluginIds.delete(plugin.id);
         Commands(this.app, this.manager);
         new Notice(this.manager.translator.t("管理器_启用BPM忽略插件中_提示"));
         await this.reloadShowData();
@@ -1723,12 +1704,6 @@ export class ManagerModal extends Modal {
         }
     }
 
-    private isManagedPluginEnabled(pluginId: string): boolean {
-        if (this.settings.DELAY) {
-            return Boolean(this.settings.Plugins.find((plugin) => plugin.id === pluginId)?.enabled);
-        }
-        return this.isPluginEnabledForDisplay(pluginId);
-    }
 
     private getSelectedManagerPlugins(): ManagerPlugin[] {
         return this.settings.Plugins.filter((plugin) => this.bulkSelectedPluginIds.has(plugin.id));
@@ -2040,24 +2015,13 @@ export class ManagerModal extends Modal {
         }))) return;
         const progress = this.showInlineProgress(t("管理器_应用更改中_提示"));
         let processed = 0;
-        for (const plugin of plugins) {
-            const isEnabled = this.isManagedPluginEnabled(plugin.id);
-            if (isEnabled !== targetEnabled) {
-                plugin.enabled = targetEnabled;
-                if (this.settings.DELAY) {
-                    if (targetEnabled) await this.appPlugins.enablePlugin(plugin.id);
-                    else await this.appPlugins.disablePlugin(plugin.id);
-                } else {
-                    if (targetEnabled) await this.appPlugins.enablePluginAndSave(plugin.id);
-                    else await this.appPlugins.disablePluginAndSave(plugin.id);
-                }
-                this.singleStartedPluginIds.delete(plugin.id);
-            }
+        const states: Record<string, boolean> = {};
+        for (const plugin of plugins) states[plugin.id] = targetEnabled;
+        await this.manager.pluginStartup.setWantedMany(states, { userInitiated: true }, (pluginId) => {
             processed++;
-            progress.update(processed, plugins.length, plugin.id);
-        }
+            progress.update(processed, plugins.length, pluginId);
+        });
         progress.hide();
-        await this.manager.saveSettings();
         Commands(this.app, this.manager);
         await this.reloadShowData();
         new Notice(t("批量编辑_已更新状态", { count: plugins.length }));
@@ -3214,22 +3178,22 @@ export class ManagerModal extends Modal {
                 }
                 // 第二组：插件管理类
                 const hasIgnoredEnableMenuItem = Boolean(currentIsBpmIgnored && this.isMainPageActionInMenu("enableIgnored"));
-                const hasManageMenuItems = (!this.settings.DELAY && (this.isMainPageActionInMenu("singleStart") || this.isMainPageActionInMenu("restart"))) || hasIgnoredEnableMenuItem || this.isMainPageActionInMenu("hide");
+                const hasManageMenuItems = this.isMainPageActionInMenu("singleStart") || this.isMainPageActionInMenu("restart") || hasIgnoredEnableMenuItem || this.isMainPageActionInMenu("hide");
                 if (hasManageMenuItems) addContextSeparator();
                 // [菜单] 单次启动
-                if (!this.settings.DELAY && this.isMainPageActionInMenu("singleStart")) menu.addItem((item) =>
+                if (this.isMainPageActionInMenu("singleStart")) menu.addItem((item) =>
                     item.setTitle(this.manager.translator.t("菜单_单次启动_描述"))
                         .setIcon("repeat-1")
-                        .setDisabled(isSelf || currentIsEnabled)
+                        .setDisabled(isSelf || this.isPluginLoaded(plugin.id))
                         .onClick(async () => {
                             await this.singleStartPlugin(plugin);
                         })
                 );
                 // [菜单] 重启插件
-                if (!this.settings.DELAY && this.isMainPageActionInMenu("restart")) menu.addItem((item) =>
+                if (this.isMainPageActionInMenu("restart")) menu.addItem((item) =>
                     item.setTitle(this.manager.translator.t("菜单_重启插件_描述"))
                         .setIcon("refresh-ccw")
-                        .setDisabled(isSelf || !currentIsEnabled)
+                        .setDisabled(isSelf || !this.isPluginLoaded(plugin.id))
                         .onClick(async () => {
                             await this.restartPlugin(plugin);
                         })
@@ -3669,23 +3633,23 @@ export class ManagerModal extends Modal {
                         hasPreviousGroup = hasCurrentGroup;
                         hasCurrentGroup = false;
 
-                        if (!this.settings.DELAY && this.isMainPageActionInMenu("singleStart")) {
+                        if (this.isMainPageActionInMenu("singleStart")) {
                             if (hasPreviousGroup && !hasCurrentGroup) menu.addSeparator();
                             menu.addItem((item) => item
                                 .setTitle(this.manager.translator.t("菜单_单次启动_描述"))
                                 .setIcon("repeat-1")
-                                .setDisabled(isSelf || currentIsEnabled)
+                                .setDisabled(isSelf || this.isPluginLoaded(plugin.id))
                                 .onClick(async () => {
                                     await this.singleStartPlugin(plugin);
                                 }));
                             hasCurrentGroup = true;
                         }
-                        if (!this.settings.DELAY && this.isMainPageActionInMenu("restart")) {
+                        if (this.isMainPageActionInMenu("restart")) {
                             if (hasPreviousGroup && !hasCurrentGroup) menu.addSeparator();
                             menu.addItem((item) => item
                                 .setTitle(this.manager.translator.t("菜单_重启插件_描述"))
                                 .setIcon("refresh-ccw")
-                                .setDisabled(isSelf || !currentIsEnabled)
+                                .setDisabled(isSelf || !this.isPluginLoaded(plugin.id))
                                 .onClick(async () => {
                                     await this.restartPlugin(plugin);
                                 }));
@@ -3813,12 +3777,12 @@ export class ManagerModal extends Modal {
                     });
                 }
 
-                if (!this.settings.DELAY) {
+                {
                     singleStartButton = this.createConfiguredItemAction(itemEl.controlEl, "singleStart");
                     if (singleStartButton) {
                         singleStartButton.setIcon("repeat-1");
                         singleStartButton.setTooltip(this.manager.translator.t("菜单_单次启动_描述"));
-                        singleStartButton.setDisabled(isSelf || isEnabled);
+                        singleStartButton.setDisabled(isSelf || this.isPluginLoaded(plugin.id));
                         singleStartButton.onClick(async () => {
                             await this.singleStartPlugin(plugin);
                         });
@@ -3828,7 +3792,7 @@ export class ManagerModal extends Modal {
                     if (restartButton) {
                         restartButton.setIcon("refresh-ccw");
                         restartButton.setTooltip(this.manager.translator.t("菜单_重启插件_描述"));
-                        restartButton.setDisabled(isSelf || !isEnabled);
+                        restartButton.setDisabled(isSelf || !this.isPluginLoaded(plugin.id));
                         restartButton.onClick(async () => {
                             await this.restartPlugin(plugin);
                         });
@@ -3912,7 +3876,8 @@ export class ManagerModal extends Modal {
                         })();
                     });
                     openPluginSettingEl = getExtraButtonElement(openPluginSetting);
-                    if (!isEnabled) {
+                    // A plugin's settings tab only exists while it's running.
+                    if (!this.isPluginLoaded(plugin.id)) {
                         openPluginSetting.setDisabled(true);
                         openPluginSettingEl?.addClass("manager-display-none");
                     }
@@ -4000,8 +3965,8 @@ export class ManagerModal extends Modal {
                             }
                             // 同步“打开设置”按钮（启用后出现，禁用后隐藏）
                             if (openPluginSetting) {
-                                openPluginSetting.setDisabled(!targetEnabled);
-                                openPluginSettingEl?.classList.toggle("manager-display-none", !targetEnabled);
+                                openPluginSetting.setDisabled(!this.isPluginLoaded(plugin.id));
+                                openPluginSettingEl?.classList.toggle("manager-display-none", !this.isPluginLoaded(plugin.id));
                             }
                             // 按需从当前视图移除，避免全量重绘
                             if (removeByFilter) {
@@ -4010,27 +3975,13 @@ export class ManagerModal extends Modal {
                             // 更新底部统计
                             this.updateStats();
                         };
-                        if (this.settings.DELAY) {
-                            if (targetEnabled) {
-                                managerPluginForToggle.enabled = true;
-                                await this.manager.savePluginAndExport(plugin.id);
-                                await this.appPlugins.enablePlugin(plugin.id);
-                            } else {
-                                managerPluginForToggle.enabled = false;
-                                await this.manager.savePluginAndExport(plugin.id);
-                                await this.appPlugins.disablePlugin(plugin.id);
-                            }
-                        } else {
-                            if (targetEnabled) {
-                                managerPluginForToggle.enabled = true;
-                                await this.appPlugins.enablePluginAndSave(plugin.id);
-                            } else {
-                                managerPluginForToggle.enabled = false;
-                                await this.appPlugins.disablePluginAndSave(plugin.id);
-                            }
-                            await this.manager.savePluginAndExport(plugin.id);
+                        const applied = await this.manager.pluginStartup.setWanted(plugin.id, targetEnabled, { userInitiated: true });
+                        if (!applied) {
+                            // Obsidian refused to load it (e.g. desktop-only on mobile); put the toggle back.
+                            syncToggleValue(!targetEnabled);
+                            new Notice(this.manager.translator.t("通用_失败_文本"));
+                            return;
                         }
-                        this.singleStartedPluginIds.delete(plugin.id);
                         Commands(this.app, this.manager);
                         updateCardUI();
                         this.refreshPluginCard(plugin.id);
@@ -4151,14 +4102,7 @@ export class ManagerModal extends Modal {
         let totalCount = 0;
         let enabledCount = 0;
         let disabledCount = 0;
-        if (this.settings.DELAY) {
-            const plugins = this.settings.Plugins;
-            totalCount = plugins.length;
-            plugins.forEach((plugin) => {
-                if (plugin.enabled) enabledCount++;
-                else disabledCount++;
-            });
-        } else {
+        {
             const plugins = this.getUniquePluginManifests()
                 .filter((plugin) => plugin.id !== this.manager.manifest.id);
             totalCount = plugins.length;

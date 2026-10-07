@@ -53,7 +53,7 @@ export interface SetWantedOptions {
 	userInitiated?: boolean;
 }
 
-type Timer = ReturnType<typeof setTimeout>;
+type Timer = number;
 
 export class PluginStartup {
 	private readonly host: PluginStartupHost;
@@ -314,7 +314,7 @@ export class PluginStartup {
 
 	private scheduleStart(id: string, delaySeconds: number): void {
 		this.cancelScheduledStart(id);
-		const timer = setTimeout(() => {
+		const timer = window.setTimeout(() => {
 			this.delayedStarts.delete(id);
 			if (this.isWanted(id) && !this.isLoaded(id)) void this.load(id, false);
 		}, delaySeconds * 1000);
@@ -323,7 +323,7 @@ export class PluginStartup {
 
 	private cancelScheduledStart(id: string): void {
 		const timer = this.delayedStarts.get(id);
-		if (timer !== undefined) clearTimeout(timer);
+		if (timer !== undefined) window.clearTimeout(timer);
 		this.delayedStarts.delete(id);
 	}
 

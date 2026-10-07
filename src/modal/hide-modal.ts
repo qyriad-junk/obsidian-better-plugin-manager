@@ -183,7 +183,7 @@ export class HideModal extends Modal {
         for (const plugin of this.plugins) {
             const ManagerPlugin = this.manager.settings.Plugins.find((mp) => mp.id === plugin.id);
             // 插件是否开启
-            const isEnabled = this.settings.DELAY ? ManagerPlugin?.enabled : this.appPlugins.enabledPlugins.has(plugin.id);
+            const isEnabled = this.manager.pluginStartup.isWanted(plugin.id) || this.manager.pluginStartup.isLoaded(plugin.id);
             if (ManagerPlugin) {
                 // [过滤] 条件
                 switch (this.filter) {
