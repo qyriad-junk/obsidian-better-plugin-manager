@@ -11,7 +11,7 @@ import { Notice, Platform, requestUrl } from 'obsidian';
 import { BetaSource, ManagerPlugin, BPM_IGNORE_TAG, EONDR_PLUGIN_TAG_ID } from './data/types';
 import { runMigrations } from './migrations';
 import { fetchReleaseVersions, installPluginFromGithub, installThemeFromGithub, ReleaseVersion, sanitizeRepo } from './github-install';
-import { performSelfCheck } from './self-check';
+import { PluginStartup, PluginStartupHost } from './plugin-startup';
 import { SystemRibbonManager } from './manager/system-ribbon-manager';
 import { RibbonItem } from './data/types';
 import { markSourceInstalledRelease, sourceHasUpdate as sourceHasConfiguredUpdate, syncSourceReleaseCheck } from './source-release';
@@ -80,6 +80,8 @@ export default class Manager extends Plugin {
     public agreement!: Agreement;
     public repoResolver!: RepoResolver;
     public systemRibbonManager?: SystemRibbonManager;
+    /** Decides which community plugins run and how they start. See src/plugin-startup.ts. */
+    public pluginStartup!: PluginStartup;
     public updateStatus: Record<string, UpdateStatus> = {};
     private updateProgressNotice: Notice | null = null;
 
@@ -150,10 +152,10 @@ export default class Manager extends Plugin {
         this.noteTip.start();
         // 初始化设置界面
         this.addSettingTab(new ManagerSettingTab(this.app, this));
-        const pluginsChanged = this.settings.DELAY
-            ? this.enableDelay({ save: false })
-            : this.disableDelay({ save: false });
-        if (pluginsChanged) markSettingsDirty();
+        if (this.synchronizePlugins(this.getInstalledPluginManifests(), { save: false })) markSettingsDirty();
+        // Adopts native toggles, re-derives Obsidian's startup list, and (in delay mode) schedules delayed starts.
+        this.pluginStartup = new PluginStartup(this.createPluginStartupHost());
+        await this.pluginStartup.start();
         Commands(this.app, this);
 
         if (settingsDirty) {
@@ -173,10 +175,8 @@ export default class Manager extends Plugin {
 
         this.app.workspace.onLayoutReady(() => {
             this.startRibbonRuntimeFeatures();
-            // 延迟启动自检，确保 Obsidian 初始化完成，避免自动接管被覆盖
             window.setTimeout(() => {
                 if (this.isRibbonManagerEnabled()) this.cleanRibbonItems(); // 启动后清理一次
-                if (this.settings.DELAY) void performSelfCheck(this);
             }, 2000);
         });
     }
@@ -185,7 +185,7 @@ export default class Manager extends Plugin {
         this.stopRibbonRuntimeFeatures();
         TroubleshootModal.closeCurrent();
 
-        if (this.settings.DELAY) void this.disableDelaysForAllPlugins();
+        this.pluginStartup?.stop();
 
         // 临走前再清理一次
         if (this.isRibbonManagerEnabled()) this.cleanRibbonItems();
@@ -433,7 +433,49 @@ export default class Manager extends Plugin {
     }
 
     public async loadSettings() { this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()); }
-    public async saveSettings() { await this.saveData(this.settings); }
+    public async saveSettings() {
+        // Tags (bpm-ignore) and records are edited in many places; keep Obsidian's startup list derived from them.
+        if (this.pluginStartup) await this.pluginStartup.reconcile();
+        await this.saveData(this.settings);
+    }
+
+    public getInstalledPluginManifests(): PluginManifest[] {
+        return Object.values(this.appPlugins.manifests).filter((manifest: PluginManifest) => manifest.id !== this.manifest.id);
+    }
+
+    private createPluginStartupHost(): PluginStartupHost {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        const manager = this;
+        return {
+            selfId: this.manifest.id,
+            registry: this.appPlugins,
+            get settings() { return manager.settings; },
+            saveSettings: () => this.saveSettings(),
+            createRecord: (id, wanted) => {
+                const record = this.createPluginRecord(id, wanted);
+                this.settings.Plugins.push(record);
+                return record;
+            },
+        };
+    }
+
+    /** A new BPM record for an installed plugin (not added to settings). */
+    private createPluginRecord(id: string, wanted: boolean): ManagerPlugin {
+        const manifest = this.appPlugins.manifests[id] as PluginManifest | undefined;
+        const record: ManagerPlugin = {
+            id,
+            name: manifest?.name || id,
+            desc: manifest?.description || '',
+            group: '',
+            tags: [],
+            enabled: wanted,
+            delay: '',
+            note: '',
+        };
+        if ((this.settings.BPM_INSTALLED || []).includes(id)) record.tags.push(BPM_TAG_ID);
+        this.applySpecialPluginTags(record);
+        return record;
+    }
 
     private getSecretStorage(): SecretStorageLike | null {
         const storage = (this.app as unknown as { secretStorage?: SecretStorageLike }).secretStorage;
@@ -860,87 +902,6 @@ export default class Manager extends Plugin {
         if (cleaned) console.log("[BPM] Cleaned undefined items from leftRibbon.");
     }
 
-    // 关闭延时 调用
-    public disableDelay(options: { save?: boolean } = {}): boolean {
-        const plugins = Object.values(this.appPlugins.manifests).filter((pm: PluginManifest) => pm.id !== this.manifest.id);
-        return this.synchronizePlugins(plugins, options);
-    }
-
-    // 开启延时 调用
-    private isBpmIgnoredPlugin(pluginId: string): boolean {
-        return Boolean(this.settings.Plugins.find(plugin => plugin.id === pluginId)?.tags.includes(BPM_IGNORE_TAG));
-    }
-
-    private getDelayManagedPluginManifests(): PluginManifest[] {
-        return Object.values(this.appPlugins.manifests)
-            .filter((pm: PluginManifest) => pm.id !== this.manifest.id && !this.isBpmIgnoredPlugin(pm.id));
-    }
-
-    public enableDelay(options: { save?: boolean } = {}): boolean {
-        const plugins = Object.values(this.appPlugins.manifests).filter((pm: PluginManifest) => pm.id !== this.manifest.id);
-        // 同步插件
-        const changed = this.synchronizePlugins(plugins, options);
-        // 开始延时启动插件
-        this.getDelayManagedPluginManifests().forEach((plugin: PluginManifest) => this.startPluginWithDelay(plugin.id));
-        return changed;
-    }
-
-    // 为所有插件启动延迟
-    public async enableDelaysForAllPlugins() {
-        // 获取所有插件
-        const plugins = Object.values(this.appPlugins.manifests).filter((pm: PluginManifest) => pm.id !== this.manifest.id);
-        // 同步插件
-        this.synchronizePlugins(plugins);
-
-        for (const plugin of this.getDelayManagedPluginManifests()) {
-            // 插件状态
-            const isEnabled = this.appPlugins.enabledPlugins.has(plugin.id);
-            if (isEnabled) {
-                // 1. 关闭插件
-                await this.appPlugins.disablePluginAndSave(plugin.id);
-                // 2. 开启插件
-                await this.appPlugins.enablePlugin(plugin.id);
-                // 3. 切换配置状态
-                const mp = this.settings.Plugins.find(p => p.id === plugin.id);
-                if (mp) mp.enabled = true;
-                // 4. 保存状态
-                await this.saveSettings();
-            } else {
-                // 1. 切换配置文件
-                const mp = this.settings.Plugins.find(p => p.id === plugin.id);
-                if (mp) mp.enabled = false;
-                // 2. 保存状态
-                await this.saveSettings();
-            }
-        }
-    }
-
-    // 为所有插件关闭延迟
-    public async disableDelaysForAllPlugins() {
-        const plugins = this.getDelayManagedPluginManifests();
-        for (const pm of plugins) {
-            const plugin = this.settings.Plugins.find(p => p.id === pm.id)
-            if (plugin) {
-                if (plugin.enabled) {
-                    await this.appPlugins.disablePlugin(pm.id);
-                    await this.appPlugins.enablePluginAndSave(pm.id);
-                }
-            }
-        }
-    }
-
-    // 延时启动指定插件
-    private startPluginWithDelay(id: string) {
-        if (id === this.manifest.id) return;
-        if (this.isBpmIgnoredPlugin(id)) return;
-        const plugin = this.settings.Plugins.find(p => p.id === id);
-        if (plugin && plugin.enabled) {
-            const delay = this.settings.DELAYS.find(item => item.id === plugin.delay);
-            const time = delay ? delay.time : 0;
-            window.setTimeout(() => { void this.appPlugins.enablePlugin(id); }, time * 1000);
-        }
-    }
-
     // 同步插件到配置文件
     public synchronizePlugins(p1: PluginManifest[], options: { save?: boolean } = {}): boolean {
         const previousStateJson = JSON.stringify({
@@ -958,17 +919,8 @@ export default class Manager extends Plugin {
         p1.forEach(p1Item => {
             let mp = pluginSettingsById.get(p1Item.id);
             if (!mp) {
-                const isEnabled = this.appPlugins.enabledPlugins.has(p1Item.id);
-                mp = {
-                    'id': p1Item.id,
-                    'name': p1Item.name,
-                    'desc': p1Item.description,
-                    'group': '',
-                    'tags': [],
-                    'enabled': isEnabled,
-                    'delay': '',
-                    'note': ''
-                };
+                // Initially wanted iff on Obsidian's startup list; PluginStartup.start() adopts the rest.
+                mp = this.createPluginRecord(p1Item.id, this.appPlugins.enabledPlugins.has(p1Item.id));
                 nextPlugins.push(mp);
                 pluginSettingsById.set(p1Item.id, mp);
             }

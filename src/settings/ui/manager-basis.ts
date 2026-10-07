@@ -53,28 +53,11 @@ export default class ManagerBasis extends BaseSetting {
             .setDesc(this.manager.translator.t("设置_基础设置_延时启动_描述"));
         const DelayToggle = new ToggleComponent(DelayBar.controlEl);
         DelayToggle.setValue(this.settings.DELAY);
-        DelayToggle.onChange((value) => {
-            this.settings.DELAY = value;
-            void this.manager.saveSettings();
-            if (value) {
-                void this.manager.enableDelaysForAllPlugins();
-            } else {
-                void this.manager.disableDelaysForAllPlugins();
-            }
+        DelayToggle.onChange(async (value) => {
+            // Only rewrites Obsidian's startup list (effective next launch); nothing is reloaded.
+            await this.manager.pluginStartup.setDelayMode(value);
             // Rebuild the tab bar too: the Delay tab only exists while delay mode is on.
             this.settingTab.renderSettings();
-        });
-
-        const autoTakeoverBar = new Setting(this.containerEl)
-            .setName(this.manager.translator.t("设置_基础设置_自动接管_标题"))
-            .setDesc(this.manager.translator.t("设置_基础设置_自动接管_描述"));
-        const autoTakeoverToggle = new ToggleComponent(autoTakeoverBar.controlEl);
-        autoTakeoverToggle.setValue(this.settings.AUTO_TAKEOVER);
-        autoTakeoverToggle.setDisabled(!this.settings.DELAY);
-        autoTakeoverToggle.onChange((value) => {
-            if (!this.settings.DELAY) return;
-            this.settings.AUTO_TAKEOVER = value;
-            void this.manager.saveSettings();
         });
 
         heading("设置_基础设置_分组_更新来源");

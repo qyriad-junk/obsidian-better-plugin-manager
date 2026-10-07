@@ -98,10 +98,6 @@ export interface ManagerSettings {
     RIBBON_MANAGER_ENABLED: boolean;
     /** 管理页插件功能显示位置；item 表示直接展示在插件卡片上，menu 表示收纳到右键菜单。 */
     MAIN_PAGE_ACTION_PLACEMENT: MainPageActionPlacementSettings;
-    /** 自检发现非 BPM 管理插件时，是否自动接管 community-plugins.json。 */
-    AUTO_TAKEOVER: boolean;
-    /** 用户是否选择不再显示自检接管提示。 */
-    SELF_CHECK_IGNORED?: boolean;
     /** 是否为每个插件注册启用/禁用命令。 */
     COMMAND_ITEM: boolean;
     /** 是否为每个分组注册批量启用/禁用命令。 */
@@ -256,8 +252,6 @@ export const DEFAULT_SETTINGS: ManagerSettings = {
     HIDE_BPM_TAG: false,
     RIBBON_MANAGER_ENABLED: false,
     MAIN_PAGE_ACTION_PLACEMENT: { ...DEFAULT_MAIN_PAGE_ACTION_PLACEMENT },
-    AUTO_TAKEOVER: false,
-    SELF_CHECK_IGNORED: false,
     COMMAND_ITEM: false,
     COMMAND_GROUP: false,
     COMMAND_TAG: false,

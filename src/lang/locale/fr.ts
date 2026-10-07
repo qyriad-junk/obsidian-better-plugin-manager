@@ -202,25 +202,11 @@ export default {
     设置_基础设置_调试模式_描述: 'Désactivé : erreurs uniquement. Activé : logs de debug.',
     管理器_更多操作_描述: 'Plus d’actions',
     管理器_打开仓库_标题: 'Ouvrir le dépôt',
-    设置_基础设置_自动接管_标题: 'Gérer automatiquement les nouveaux plugins',
-    设置_基础设置_自动接管_描述: 'Gérer automatiquement les nouveaux plugins installés depuis le marché (activer et gérer via BPM), en supprimant le message de prise de contrôle.',
     提示_BPM忽略_标题: 'Ignoré par BPM',
     提示_BPM忽略_描述: 'Ce plugin a l\'étiquette "bpm-ignore". BPM ne gérera pas son état ni son délai.',
     提示_BPM忽略_操作拦截: 'Ce plugin a l\'étiquette "bpm-ignore", les opérations sont désactivées dans BPM.',
 
     // Self-check
-    自检_检测到插件_标题: 'Plugins non gérés par BPM détectés',
-    自检_检测到插件_说明: 'Le fichier community-plugins.json d\'Obsidian contient des plugins lancés par Obsidian. Pour éviter les conflits, il est recommandé de laisser BPM prendre le contrôle.',
-    自检_检测到插件_列表: 'Plugins détectés :',
-    自检_警告_文本: 'Ignorer ceci peut causer des incohérences d\'état des plugins ou des dysfonctionnements du démarrage différé.',
-    自检_接管_按钮: 'Laisser BPM prendre le contrôle',
-    自检_忽略_按钮: 'Ignorer cette fois',
-    自检_不再提示_按钮: 'Ne plus afficher',
-    自检_接管成功_通知: 'Contrôle des plugins pris avec succès',
-    自检_接管失败_通知: 'Échec de la prise de contrôle, veuillez modifier community-plugins.json manuellement',
-    自检_需要重启_通知: 'Veuillez redémarrer Obsidian pour appliquer les modifications',
-    自检_忽略警告_通知: 'Avertissement ignoré. L\'utilisation mixte d\'Obsidian et BPM peut causer des problèmes',
-    自检_不再提示确认_通知: 'Ne s\'affichera plus. Vous pouvez le réactiver dans les paramètres',
 
     // Ribbon
     管理器_Ribbon管理_描述: 'Gérer les icônes du ruban',
