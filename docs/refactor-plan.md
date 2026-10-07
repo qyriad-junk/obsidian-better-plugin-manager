@@ -23,6 +23,9 @@ Six places answer that question differently, and every annoyance and most remain
 
 ## 0. Groundwork: a test harness and a current toolchain
 
+**Done (2026-10-07, `refactor/plugin-startup`).** vitest + fake plugin manager, TS 5.9 / esbuild 0.28 / types 1.13, CI,
+`npm run lint` (not enforced yet).
+
 Nothing can run Obsidian in CI or in the cloud container, so pure-logic tests against a fake
 `app.plugins` registry are the only safety net for everything below. This pass already used two throwaway versions
 (troubleshoot simulation: old code failed 3666/5814 runs; version-comparator table).
@@ -34,6 +37,10 @@ Nothing can run Obsidian in CI or in the cloud container, so pure-logic tests ag
 - Add a `lint` script with the store bot's `eslint-plugin-obsidianmd` ruleset. 198 findings today; treat it as a ratchet.
 
 ## 1. One owner for plugin enablement (the untangle)
+
+**Done (2026-10-07, `refactor/plugin-startup`)** as `src/plugin-startup.ts` (`PluginStartup`). Names as built:
+`isWanted` / native startup list / `isLoaded`. Beyond the sketch below: native toggles are adopted (incl. unloads, since
+Obsidian's own toggle shows running state), and `reconcile()` runs on every settings save. See codebase-notes.md.
 
 A new module (working name `PluginStartup`) that is the only code allowed to call
 `enablePlugin` / `disablePlugin` / `*AndSave` or touch `enabledPlugins`. It distinguishes three things that are
