@@ -8,7 +8,10 @@ and the known annoyances, smaller. Background and line-level detail: [codebase-n
 - BPM's own per-plugin record is the source of truth for "wanted on", in both modes. (Step 1 as proposed.)
 - Startup should be framed as **"blocks workspace-ready" vs. "doesn't"**, not seconds: delays were only ever a way to
   get plugins out of the blocking set. Step 2 is reframed accordingly (startup tiers; any remaining delay counts from
-  layout-ready).
+  layout-ready). Within the "after ready" tier, plugins start in list order; no separate ordering control (2026-10-07).
+- Native toggles (Obsidian's own settings, CLI) are adopted as the user's intent instead of being "taken over":
+  BPM never calls `*AndSave`, so any `enabledPlugins` change it didn't make is the user's. The takeover prompt and its
+  settings go away (2026-10-07).
 - Remove upstream branding (step 3).
 - The manager becomes a workspace tab, and **never auto-opens at startup** (step 7).
 - Runtime verification is possible now: `scripts/sandbox/` runs a real Obsidian headlessly.
