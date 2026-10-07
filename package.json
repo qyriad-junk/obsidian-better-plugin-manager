@@ -12,13 +12,13 @@
   "author": "zero",
   "license": "MIT",
   "devDependencies": {
-    "@types/node": "^16.11.6",
+    "@types/node": "^22.20.5",
     "@typescript-eslint/eslint-plugin": "5.29.0",
     "@typescript-eslint/parser": "5.29.0",
-    "esbuild": "0.17.3",
-    "obsidian": "latest",
+    "esbuild": "^0.28.2",
+    "obsidian": "~1.13.1",
     "playwright-core": "^1.63.0",
     "tslib": "2.4.0",
-    "typescript": "4.7.4"
+    "typescript": "^5.9.3"
   }
 }
