@@ -18,9 +18,10 @@ import type { ObsidianPluginRegistry } from "./obsidian-internals";
  * `bpm-ignore` means "Obsidian's native startup list is authoritative for this plugin": BPM mirrors its native state
  * into the record and never schedules it.
  *
- * BPM never calls `enablePluginAndSave` / `disablePluginAndSave`. So whenever the native startup list changes in a way
- * BPM didn't make, the user toggled a plugin in Obsidian's own settings (or via the CLI), and that is adopted as their
- * intent (see {@link PluginStartup.adoptNativeChanges}).
+ * BPM never calls `enablePluginAndSave` / `disablePluginAndSave`, and every load/unload BPM causes goes through this
+ * class. So a change BPM didn't make is the user toggling a plugin in Obsidian's own settings (or the CLI), and it's
+ * adopted as their intent (see {@link PluginStartup.adoptExternalChanges}). Note that Obsidian's own toggle shows
+ * whether a plugin is *running*: switching off a plugin BPM started only unloads it, without touching the native list.
  *
  * Obsidian internals relied on here are documented in docs/codebase-notes.md and modelled by
  * tests/support/fake-plugin-manager.ts.
@@ -58,6 +59,10 @@ export class PluginStartup {
 	private readonly host: PluginStartupHost;
 	/** The native startup list as BPM last left it, to tell the user's native toggles apart from BPM's own writes. */
 	private knownNativeList = new Set<string>();
+	/** Plugins tagged bpm-ignore as of the last reconcile, to notice the tag being added or removed anywhere. */
+	private knownIgnored = new Set<string>();
+	/** What's running as far as BPM knows (it updates this *before* each load/unload it causes). */
+	private knownLoaded = new Set<string>();
 	private changeRef: EventRef | null = null;
 	private delayedStarts = new Map<string, Timer>();
 
@@ -163,33 +168,106 @@ export class PluginStartup {
 	}
 
 	/**
-	 * Adopt changes to the native startup list that BPM didn't make: the user toggled a plugin in Obsidian's own
-	 * settings (or the CLI). Called on every `app.plugins` "changed" event.
+	 * Adopt changes BPM didn't make: the user toggled a plugin in Obsidian's own settings (or the CLI). Called on
+	 * every `app.plugins` "changed" event.
 	 *
-	 * In delay mode, a plugin enabled natively stays native for the rest of this session (it's already running);
-	 * it moves back under BPM's control at the next launch.
+	 * - Added to the native list: wanted. (In delay mode, the next reconcile hands it back to BPM; it keeps running,
+	 *   so Obsidian's toggle, which shows running state, doesn't flip back.)
+	 * - Removed from the native list, or unloaded without BPM doing it: not wanted.
+	 *
+	 * Loads BPM didn't cause aren't adopted on their own: native enables also add to the native list, and anything
+	 * else (another plugin starting one) isn't a statement of intent.
 	 */
-	adoptNativeChanges(): boolean {
-		const current = new Set(this.registry.enabledPlugins);
+	adoptExternalChanges(): boolean {
+		const native = new Set(this.registry.enabledPlugins);
+		const loaded = new Set(Object.keys(this.registry.plugins ?? {}));
+		const external = (id: string) => id !== this.host.selfId && !this.isIgnored(id);
 		let changed = false;
-		for (const id of current) {
-			if (this.knownNativeList.has(id) || id === this.host.selfId || this.isIgnored(id)) continue;
-			changed = this.setRecordWanted(id, true) || changed;
+		for (const id of native) {
+			if (!this.knownNativeList.has(id) && external(id)) changed = this.setRecordWanted(id, true) || changed;
 		}
 		for (const id of this.knownNativeList) {
-			if (current.has(id) || id === this.host.selfId || this.isIgnored(id)) continue;
-			changed = this.setRecordWanted(id, false) || changed;
+			if (!native.has(id) && external(id)) changed = this.setRecordWanted(id, false) || changed;
 		}
-		this.knownNativeList = current;
+		for (const id of this.knownLoaded) {
+			if (!loaded.has(id) && external(id)) changed = this.setRecordWanted(id, false) || changed;
+		}
+		this.knownNativeList = native;
+		this.knownLoaded = loaded;
 		return changed;
 	}
 
+	/** Load a plugin, noting that BPM caused it. */
+	private async load(id: string, userInitiated: boolean): Promise<boolean> {
+		this.knownLoaded.add(id);
+		const ok = await this.registry.enablePlugin(id, userInitiated);
+		if (!ok && !this.isLoaded(id)) this.knownLoaded.delete(id);
+		return ok;
+	}
+
+	/** Unload a plugin, noting that BPM caused it. */
+	private async unload(id: string, userInitiated: boolean): Promise<void> {
+		this.knownLoaded.delete(id);
+		await this.registry.disablePlugin(id, userInitiated);
+	}
+
+	/**
+	 * Run `during` with the plugin unloaded (e.g. while replacing its files or its data.json), then load it again if
+	 * it was running. Neither step is mistaken for the user toggling it.
+	 */
+	async whileUnloaded(id: string, during: () => Promise<void>): Promise<boolean> {
+		const wasLoaded = this.isLoaded(id);
+		if (wasLoaded) await this.unload(id, false);
+		try {
+			await during();
+		} finally {
+			if (wasLoaded) await this.load(id, false);
+		}
+		return wasLoaded;
+	}
+
+	/** Returns whether anything changed (including creating the record). */
 	private setRecordWanted(id: string, wanted: boolean): boolean {
 		if (!this.isInstalled(id)) return false;
-		const record = this.getRecord(id) ?? this.host.createRecord(id, wanted);
-		if (record.enabled === wanted) return false;
-		record.enabled = wanted;
+		const existing = this.getRecord(id);
+		if (!existing) {
+			this.host.createRecord(id, wanted);
+			return true;
+		}
+		if (existing.enabled === wanted) return false;
+		existing.enabled = wanted;
 		return true;
+	}
+
+	private currentlyIgnored(): Set<string> {
+		return new Set(this.host.settings.Plugins
+			.filter((record) => record.id !== this.host.selfId && record.tags?.includes(BPM_IGNORE_TAG))
+			.map((record) => record.id));
+	}
+
+	/**
+	 * Apply bpm-ignore being added or removed since last time (tags are edited in several places), then re-derive
+	 * the native startup list. Manager.saveSettings() calls this before every save, so no edit path can leave the
+	 * native list stale.
+	 *
+	 * Newly ignored: the plugin goes on/off the native list according to whether it was wanted. Newly un-ignored:
+	 * it's wanted iff it was on the native list or running.
+	 */
+	async reconcile(): Promise<void> {
+		const ignored = this.currentlyIgnored();
+		for (const id of ignored) {
+			if (this.knownIgnored.has(id)) continue;
+			this.cancelScheduledStart(id);
+			if (this.getRecord(id)?.enabled) this.registry.enabledPlugins.add(id);
+			else this.registry.enabledPlugins.delete(id);
+		}
+		for (const id of this.knownIgnored) {
+			if (ignored.has(id)) continue;
+			const record = this.getRecord(id);
+			if (record) record.enabled = this.registry.enabledPlugins.has(id) || this.isLoaded(id);
+		}
+		this.knownIgnored = ignored;
+		await this.syncNativeStartupList();
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -206,6 +284,8 @@ export class PluginStartup {
 	 * 4. Watch for native toggles from now on.
 	 */
 	async start(): Promise<void> {
+		this.knownIgnored = this.currentlyIgnored();
+		this.knownLoaded = new Set(Object.keys(this.registry.plugins ?? {}));
 		let recordsChanged = false;
 		for (const id of Object.keys(this.registry.manifests)) {
 			if (!this.isManaged(id)) continue;
@@ -221,7 +301,7 @@ export class PluginStartup {
 		if (this.host.settings.DELAY) this.scheduleDelayedStarts();
 
 		this.changeRef = this.registry.on("changed", () => {
-			if (this.adoptNativeChanges()) void this.host.saveSettings();
+			if (this.adoptExternalChanges()) void this.host.saveSettings();
 		});
 	}
 
@@ -236,7 +316,7 @@ export class PluginStartup {
 		this.cancelScheduledStart(id);
 		const timer = setTimeout(() => {
 			this.delayedStarts.delete(id);
-			if (this.isWanted(id) && !this.isLoaded(id)) void this.registry.enablePlugin(id);
+			if (this.isWanted(id) && !this.isLoaded(id)) void this.load(id, false);
 		}, delaySeconds * 1000);
 		this.delayedStarts.set(id, timer);
 	}
@@ -274,7 +354,7 @@ export class PluginStartup {
 		}
 		if (added) void this.registry.saveConfig();
 		for (const id of pending) {
-			if (this.isWanted(id)) void this.registry.enablePlugin(id);
+			if (this.isWanted(id)) void this.load(id, false);
 		}
 	}
 
@@ -316,10 +396,10 @@ export class PluginStartup {
 		this.cancelScheduledStart(id);
 
 		if (wanted && !this.isLoaded(id)) {
-			const loaded = await this.registry.enablePlugin(id, userInitiated);
+			const loaded = await this.load(id, userInitiated);
 			if (!loaded) return null;
 		} else if (!wanted && this.isLoaded(id)) {
-			await this.registry.disablePlugin(id, userInitiated);
+			await this.unload(id, userInitiated);
 		}
 
 		const record = this.getRecord(id) ?? this.host.createRecord(id, wanted);
@@ -336,14 +416,14 @@ export class PluginStartup {
 	async startOnce(id: string): Promise<boolean> {
 		if (id === this.host.selfId || !this.isInstalled(id)) return false;
 		this.cancelScheduledStart(id);
-		return this.registry.enablePlugin(id, true);
+		return this.load(id, true);
 	}
 
 	/** Unload and load a running plugin again. Doesn't change whether it's wanted or the native startup list. */
 	async restart(id: string): Promise<boolean> {
 		if (id === this.host.selfId || !this.isLoaded(id)) return false;
-		await this.registry.disablePlugin(id);
-		return this.registry.enablePlugin(id);
+		await this.unload(id, false);
+		return this.load(id, false);
 	}
 
 	/**
@@ -356,7 +436,7 @@ export class PluginStartup {
 			const pending = this.pendingStarts();
 			for (const id of pending) {
 				this.cancelScheduledStart(id);
-				if (this.isWanted(id)) await this.registry.enablePlugin(id);
+				if (this.isWanted(id)) await this.load(id, false);
 			}
 		}
 		await this.syncNativeStartupList();
@@ -365,24 +445,14 @@ export class PluginStartup {
 
 	/**
 	 * Add or remove `bpm-ignore`. Ignoring hands the plugin to Obsidian's native startup list in its current wanted
-	 * state; un-ignoring takes it back under BPM with whatever state it had natively.
+	 * state; un-ignoring takes it back under BPM with whatever state it had natively (see {@link reconcile}).
 	 */
 	async setIgnored(id: string, ignored: boolean): Promise<void> {
 		if (id === this.host.selfId || !this.isInstalled(id)) return;
-		const record = this.getRecord(id) ?? this.host.createRecord(id, this.isWanted(id));
 		if (ignored === this.isIgnored(id)) return;
-		if (ignored) {
-			const wanted = this.isWanted(id);
-			record.tags = [...record.tags, BPM_IGNORE_TAG];
-			this.cancelScheduledStart(id);
-			if (wanted) this.registry.enabledPlugins.add(id);
-			else this.registry.enabledPlugins.delete(id);
-			record.enabled = wanted;
-		} else {
-			record.enabled = this.registry.enabledPlugins.has(id) || this.isLoaded(id);
-			record.tags = record.tags.filter((tag) => tag !== BPM_IGNORE_TAG);
-		}
-		await this.syncNativeStartupList();
+		const record = this.getRecord(id) ?? this.host.createRecord(id, this.isWanted(id));
+		record.tags = ignored ? [...record.tags, BPM_IGNORE_TAG] : record.tags.filter((tag) => tag !== BPM_IGNORE_TAG);
+		await this.reconcile();
 		await this.host.saveSettings();
 	}
 
@@ -402,10 +472,10 @@ export class PluginStartup {
 
 		let ok = true;
 		if (this.isLoaded(id)) {
-			await this.registry.disablePlugin(id);
-			ok = await this.registry.enablePlugin(id);
+			await this.unload(id, false);
+			ok = await this.load(id, false);
 		} else if (this.isWanted(id)) {
-			ok = await this.registry.enablePlugin(id, isNew);
+			ok = await this.load(id, isNew);
 		}
 		await this.syncNativeStartupList();
 		await this.host.saveSettings();

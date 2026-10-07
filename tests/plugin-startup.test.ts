@@ -30,7 +30,8 @@ class Vault {
 			selfId: BPM,
 			registry: this.plugins as unknown as PluginStartupRegistry,
 			settings: this.settings,
-			saveSettings: async () => { this.saves++; },
+			// Like Manager.saveSettings(): reconcile, then persist.
+			saveSettings: async () => { await this.startup?.reconcile(); this.saves++; },
 			createRecord: (id, wanted) => {
 				const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: "", note: "" };
 				this.settings.Plugins.push(record);
@@ -52,6 +53,11 @@ class Vault {
 }
 
 const advance = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+/**
+ * Let pending 0 ms work run (e.g. Obsidian's "changed" event). Advances 1 ms because the fake clock doesn't fire 0 ms
+ * timers that were scheduled by a timer firing during the same advanceTimersByTimeAsync(0).
+ */
+const settle = () => vi.advanceTimersByTimeAsync(1);
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
@@ -121,7 +127,7 @@ describe("delay mode", () => {
 		vault.settings.DELAY = true;
 		await vault.launch(); // a was on the native list: adopted, moved under BPM from the next launch
 		await vault.launch();
-		await advance(0);
+		await settle();
 		expect(vault.plugins.plugins.a?.userEnabled).toBe(false);
 	});
 
@@ -170,11 +176,11 @@ describe("delay mode", () => {
 		vault.record("b").delay = "later";
 		await vault.startup.setDelayMode(true);
 		await vault.launch();
-		await advance(0);
+		await settle();
 		expect(vault.startup.pendingStarts()).toEqual(["b"]);
 
 		vault.startup.stop();
-		await advance(0);
+		await settle();
 		expect(vault.native()).toEqual([BPM, "a", "b"].sort());
 		expect(vault.plugins.loaded()).toEqual([BPM, "a", "b"].sort());
 	});
@@ -187,29 +193,58 @@ describe("native toggles (Obsidian's own settings / CLI)", () => {
 		await vault.launch();
 
 		await vault.plugins.enablePluginAndSave("a");
-		await advance(0);
+		await settle();
 		expect(vault.startup.isWanted("a")).toBe(true);
 
 		await vault.plugins.disablePluginAndSave("a");
-		await advance(0);
+		await settle();
 		expect(vault.startup.isWanted("a")).toBe(false);
 	});
 
-	test("in delay mode, a natively enabled plugin stays native this session and moves under BPM next launch", async () => {
+	test("in delay mode, switching off a BPM-started plugin natively (it's only unloaded) is adopted", async () => {
+		// Obsidian's toggle shows running state, so a BPM-started plugin shows "on"; turning it off there calls
+		// disablePluginAndSave, which can't change the native list (the plugin isn't on it) and just unloads it.
+		const vault = new Vault(["a"]);
+		vault.settings.DELAY = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await vault.launch();
+		await vault.launch();
+		await settle();
+		expect(vault.plugins.loaded()).toEqual([BPM, "a"].sort());
+
+		await vault.plugins.disablePluginAndSave("a");
+		await settle();
+		expect(vault.startup.isWanted("a")).toBe(false);
+		await vault.launch();
+		await advance(10_000);
+		expect(vault.plugins.loaded()).toEqual([BPM]);
+	});
+
+	test("a native enable in delay mode is handed back to BPM without stopping the plugin", async () => {
 		const vault = new Vault(["a"]);
 		vault.settings.DELAY = true;
 		vault.plugins.communityPluginsOnDisk = [BPM];
 		await vault.launch();
-
 		await vault.plugins.enablePluginAndSave("a");
-		await advance(0);
+		await settle();
+		await settle();
 		expect(vault.startup.isWanted("a")).toBe(true);
-		expect(vault.native()).toEqual([BPM, "a"].sort());
-
-		await vault.launch();
 		expect(vault.native()).toEqual([BPM]);
-		await advance(0);
 		expect(vault.plugins.loaded()).toEqual([BPM, "a"].sort());
+		// ...and switching it off again is still noticed.
+		await vault.plugins.disablePluginAndSave("a");
+		await settle();
+		expect(vault.startup.isWanted("a")).toBe(false);
+	});
+
+	test("BPM's own loads, unloads and reloads aren't mistaken for native toggles", async () => {
+		const vault = new Vault(["a", "b", "c"]);
+		vault.plugins.communityPluginsOnDisk = [BPM, "c"];
+		await vault.launch();
+		await vault.startup.restart("c");
+		await vault.startup.whileUnloaded("c", async () => { await settle(); });
+		await settle();
+		expect(vault.startup.isWanted("c")).toBe(true);
 	});
 
 	test("BPM's own changes aren't mistaken for native toggles", async () => {
@@ -217,9 +252,9 @@ describe("native toggles (Obsidian's own settings / CLI)", () => {
 		vault.plugins.communityPluginsOnDisk = [BPM];
 		await vault.launch();
 		await vault.startup.setWantedMany({ a: true, b: true });
-		await advance(0);
+		await settle();
 		await vault.startup.setWanted("b", false);
-		await advance(0);
+		await settle();
 		expect(vault.startup.isWanted("a")).toBe(true);
 		expect(vault.startup.isWanted("b")).toBe(false);
 	});
@@ -239,6 +274,23 @@ describe("bpm-ignore", () => {
 		await vault.launch();
 		expect(vault.plugins.loaded()).toEqual([BPM, "x"].sort()); // started by Obsidian, not BPM
 		expect(vault.startup.pendingStarts()).toEqual([]);
+	});
+
+	test("adding or removing the tag anywhere is picked up by reconcile()", async () => {
+		const vault = new Vault(["x"]);
+		vault.settings.DELAY = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "x"];
+		await vault.launch(); // x adopted as wanted, moved under BPM
+		expect(vault.native()).toEqual([BPM]);
+
+		vault.record("x").tags.push(BPM_IGNORE_TAG); // e.g. the tags modal
+		await vault.startup.reconcile();
+		expect(vault.native()).toEqual([BPM, "x"].sort());
+
+		vault.record("x").tags = [];
+		await vault.startup.reconcile();
+		expect(vault.native()).toEqual([BPM]);
+		expect(vault.startup.isWanted("x")).toBe(true);
 	});
 
 	test("un-ignoring takes the plugin back under BPM with its native state", async () => {
@@ -289,7 +341,7 @@ describe("installs and updates", () => {
 		vault.plugins.communityPluginsOnDisk = [BPM];
 		vault.settings.Plugins.push({ id: "a", name: "a", desc: "", group: "", tags: [], enabled: true, delay: "", note: "" });
 		await vault.launch();
-		await advance(0);
+		await settle();
 		await vault.startup.applyInstalledFiles("a");
 		expect(vault.native()).toEqual([BPM]);
 		expect(vault.plugins.loaded()).toEqual([BPM, "a"].sort());
@@ -313,7 +365,7 @@ describe("single start and restart", () => {
 			vault.settings.DELAY = delay;
 			vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 			await vault.launch();
-			await advance(0);
+			await settle();
 			const native = vault.native();
 			vault.plugins.log = [];
 			expect(await vault.startup.restart("a")).toBe(true);
