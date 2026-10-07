@@ -1,4 +1,4 @@
-import { App, ExtraButtonComponent, PluginManifest, Workspace } from "obsidian";
+import { App, EventRef, ExtraButtonComponent, PluginManifest, Workspace } from "obsidian";
 
 export type TranslationVars = Record<string, string | number | boolean | null | undefined>;
 
@@ -21,20 +21,29 @@ export type AppPluginInstanceLike = {
     [key: string]: unknown;
 };
 
+/**
+ * Obsidian's internal PluginManager (`app.plugins`). Semantics verified against Obsidian 1.13.7; see
+ * docs/codebase-notes.md. Outside src/plugin-startup.ts, prefer going through PluginStartup.
+ */
 export type ObsidianPluginRegistry = {
     manifests: Record<string, PluginManifest>;
+    /** The persisted startup list (community-plugins.json), *not* what's currently running. */
     enabledPlugins: Set<string>;
+    /** What's currently running. */
     plugins?: Record<string, AppPluginInstanceLike>;
     installPlugin: (repo: string, version: string, manifest: PluginManifest | Record<string, unknown>) => Promise<void>;
     uninstallPlugin: (id: string) => Promise<void>;
     loadManifests: () => Promise<void>;
     loadPlugin: (id: string) => Promise<void>;
-    enablePlugin: (id: string) => Promise<void>;
-    disablePlugin: (id: string) => Promise<void>;
-    enablePluginAndSave: (id: string) => Promise<void>;
+    /** Loads the plugin; false if Obsidian refused (unknown manifest, restricted mode, blocklisted, desktop-only…). */
+    enablePlugin: (id: string, userEnable?: boolean) => Promise<boolean>;
+    disablePlugin: (id: string, userDisable?: boolean) => Promise<void>;
+    enablePluginAndSave: (id: string) => Promise<boolean>;
     disablePluginAndSave: (id: string) => Promise<void>;
     /** Writes `Array.from(enabledPlugins)` to community-plugins.json. */
-    saveConfig?: () => Promise<void>;
+    saveConfig: () => Promise<void>;
+    on: (name: "changed", callback: () => void) => EventRef;
+    offref: (ref: EventRef) => void;
 };
 
 export type SettingTabLike = {

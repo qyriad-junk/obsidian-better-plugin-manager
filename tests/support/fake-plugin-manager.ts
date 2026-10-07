@@ -1,5 +1,4 @@
-import { Events } from "obsidian";
-import type { PluginManifest } from "obsidian";
+import type { EventRef, PluginManifest } from "obsidian";
 
 /**
  * In-memory stand-in for Obsidian's `app.plugins` (its internal PluginManager).
@@ -14,7 +13,7 @@ import type { PluginManifest } from "obsidian";
  *
  * Simplification: `requestSaveConfig()` saves immediately instead of after a 1 s debounce.
  */
-export class FakePluginManager extends Events {
+export class FakePluginManager {
 	manifests: Record<string, PluginManifest> = {};
 	plugins: Record<string, { id: string; userEnabled: boolean }> = {};
 	enabledPlugins = new Set<string>();
@@ -27,6 +26,16 @@ export class FakePluginManager extends Events {
 	log: string[] = [];
 
 	private changeTimer: ReturnType<typeof setTimeout> | null = null;
+	private listeners = new Set<() => void>();
+
+	on(_name: "changed", callback: () => void): EventRef {
+		this.listeners.add(callback);
+		return { callback } as unknown as EventRef;
+	}
+
+	offref(ref: EventRef): void {
+		this.listeners.delete((ref as unknown as { callback: () => void }).callback);
+	}
 
 	/** Test setup: put a plugin's files on disk. Obsidian won't know about it until loadManifests(). */
 	install(id: string, extra: Partial<PluginManifest> = {}): this {
@@ -34,8 +43,14 @@ export class FakePluginManager extends Events {
 		return this;
 	}
 
-	/** Simulate Obsidian launching: read community-plugins.json, load manifests, enable each listed plugin in turn. */
+	/**
+	 * Simulate Obsidian launching (a fresh process: no listeners, nothing loaded): read community-plugins.json,
+	 * load manifests, enable each listed plugin in turn.
+	 */
 	async startup(): Promise<void> {
+		this.listeners.clear();
+		if (this.changeTimer) clearTimeout(this.changeTimer);
+		this.changeTimer = null;
 		this.plugins = {};
 		this.enabledPlugins = new Set(this.communityPluginsOnDisk);
 		await this.loadManifests();
@@ -106,7 +121,7 @@ export class FakePluginManager extends Events {
 		if (this.changeTimer) return;
 		this.changeTimer = setTimeout(() => {
 			this.changeTimer = null;
-			this.trigger("changed");
+			for (const listener of [...this.listeners]) listener();
 		}, 0);
 	}
 
