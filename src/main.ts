@@ -167,6 +167,9 @@ export default class Manager extends Plugin {
             () => (this.app.workspace as WorkspaceWithRibbon).leftRibbon,
             await this.readSavedRibbonLayout(),
         );
+        // Start tracking the ribbon as Obsidian has just laid it out, before any late start (registered before
+        // PluginStartup's own layout-ready work, so it runs first), so later syncs keep in-session changes.
+        this.app.workspace.onLayoutReady(() => this.ribbonLayoutKeeper?.sync());
         // Adopts native toggles, re-derives Obsidian's startup list, and (staged startup) starts the rest once ready.
         this.pluginStartup = new PluginStartup(this.createPluginStartupHost());
         await this.pluginStartup.start();

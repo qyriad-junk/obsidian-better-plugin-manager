@@ -32,7 +32,9 @@ export class RibbonLayoutKeeper {
 	/**
 	 * Bring the ribbon and the remembered layout in line. An item that has appeared since the last sync gets its
 	 * remembered layout (it's a late start, added visible at the end); for every other item the live ribbon wins, so
-	 * in-session changes (the user hiding or moving an icon) are kept. Call before and after starting plugins late.
+	 * in-session changes (the user hiding or moving an icon) are kept. Call once when the layout becomes ready (every
+	 * icon there counts as arrived then, and gets the saved layout Obsidian just applied anyway), then before and after
+	 * each late start. A first call any later would revert in-session changes made before it.
 	 */
 	sync(): void {
 		const ribbon = this.ribbon();
