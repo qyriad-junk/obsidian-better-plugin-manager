@@ -68,9 +68,14 @@ which Obsidian only does for its native startup list.
 install/import respect delay mode; the takeover dance mostly disappears (the native list is always derived, so there's
 nothing to "take over"); the six disagreeing `isEnabled` checks collapse into one.
 
-## 2. Delay scheduler
+## 2. Delay scheduler → startup tiers
 
-Pulled out of `main.ts` and owned by step 1's module.
+**Done (2026-10-10, `refactor/plugin-startup`)** as startup tiers (`native` / `after-ready` / `background`,
+src/startup-tiers.ts) with "staged startup" replacing delay mode; delay presets converted on load after a byte-for-byte
+backup of data.json; ribbon layout re-applied around late starts (src/ribbon-state.ts, i.e. the core of step 6); and a
+right-click "Startup tier ▸" submenu (a slice of step 4). Fractional delays became moot. "After synced" tier: deferred
+(Qyriad 2026-10-10: no plugin needs it; plugins lacking `onExternalSettingsChange` would rather be fixed upstream).
+"Manual" tier dropped: it's just "off" plus single start. Original sketch below.
 
 - **Measure delays from layout-ready, not from BPM's `onload`.** Verified 1.13.7 startup order: community plugins
   initialize *before* vault load, metadata-cache init and layout load. So today a 0.5 s delay fires in the middle of
@@ -112,6 +117,9 @@ Today normal mode and edit mode render *different* cards, and entering edit mode
   `PluginCardController`s, never a full re-render.
 
 ## 6. Ribbon manager on native ids
+
+*The late-start fix landed in step 2 (`RibbonLayoutKeeper`). What's left here is replacing BPM's own CSS/aria-label
+ribbon manager with Obsidian's native state.*
 
 Replace aria-label matching and CSS `order`/`display` overrides with Obsidian's own ribbon state, keyed by item id:
 snapshot `workspace.json` `left-ribbon.hiddenItems` at startup, and after delayed plugins register, call

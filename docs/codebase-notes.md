@@ -42,17 +42,20 @@ Lines of code in parentheses. Real logic is ~13k lines; the rest is CSS (14k) an
 
 ```
 main.ts                         re-export of src/main.ts
-src/main.ts                (1660) Manager extends Plugin. Lifecycle, settings load/save, delay-start engine,
+src/main.ts                (1660) Manager extends Plugin. Lifecycle, settings load/save, PluginStartup host,
                                   update checks, beta-source maintenance, ribbon styling runtime, GitHub token
                                   (SecretStorage), tag colour utils, version compare. Grab-bag.
 src/settings/data.ts        (332) ManagerSettings (the whole data.json schema) + DEFAULT_SETTINGS + small types.
-src/data/types.ts            (94) ManagerPlugin, Tag/Type(=group), Delay, RibbonItem, BetaSource, … + special tag ids.
+src/data/types.ts            (94) ManagerPlugin, Tag/Type(=group), RibbonItem, BetaSource, … + special tag ids.
 src/data/data.ts             (19) unused-ish style label maps.
 src/obsidian-internals.ts    (89) Hand-written typings for undocumented app.plugins / app.setting / leftRibbon.
 src/command.ts              (704) Command palette: static + dynamic (per plugin/group/tag/profile) commands,
                                   plugin-control SuggestModals, profiles, "restore previous state" snapshot.
-src/migrations.ts           (262) Versioned data migrations (0.3.1, 0.3.2), MIGRATION_VERSION bookkeeping.
-src/plugin-startup.ts       (~480) PluginStartup: THE owner of which plugins run and how they start (see Core model).
+src/migrations.ts           (262) Versioned data migrations (0.3.1, 0.3.2), MIGRATION_VERSION bookkeeping; plus the
+                                  shape-based delay-presets → startup-tiers conversion (with backup), run on every load.
+src/plugin-startup.ts       (~560) PluginStartup: THE owner of which plugins run and how they start (see Core model).
+src/startup-tiers.ts        (~110) StartupTier (native / after-ready / background), legacy delay mapping + conversion.
+src/ribbon-state.ts          (80) RibbonLayoutKeeper: re-applies saved ribbon hidden/order after late plugin starts.
 src/version.ts               (75) Semver-aware compareVersions (the only version comparator).
 src/path-safety.ts           (14) getSafePathSegment for plugin ids / theme names used as folder names.
 src/repo-resolver.ts        (258) plugin id → GitHub repo (REPO_MAP → on-disk cache → official community list).
@@ -69,7 +72,7 @@ src/manager/system-ribbon-manager.ts (104) VESTIGIAL. Constructed but load/save/
 src/modal/manager-modal.ts (7977) THE UI. One Modal class with 8 "pages" + AppearanceProfileModal. God object.
 src/modal/*.ts             (~2.3k) Auxiliary modals: group/tags/note/hide/delete/update/update-check/ribbon/
                                   bulk-status-confirm. disable-modal.ts is unused.
-src/settings/index.ts + ui/ (~900) PluginSettingTab with tabs: basis, main-page actions, style, groups, tags, delay.
+src/settings/index.ts + ui/ (~800) PluginSettingTab with tabs: basis, main-page actions, style, groups, tags.
 src/troubleshoot/         (~1.9k) Conflict bisection: algorithm, persisted state, TWO front-ends (floating
                                   TroubleshootModal + embedded TroubleshootPanel), result modal + Markdown report.
 src/lang/inxdex.ts          (100) Translator (sic, "inxdex"). Locales in src/lang/locale/*.ts.
@@ -87,10 +90,12 @@ scripts/sandbox/                  Headless real-Obsidian sandbox (see its README
 Everything BPM knows lives in one object, loaded with a **shallow** `Object.assign({}, DEFAULT_SETTINGS, await loadData())`
 (so default arrays/objects are shared references when the key is absent from disk). Notable fields:
 
-- `Plugins: ManagerPlugin[]`: BPM's per-plugin record `{id, name, desc, group, tags[], enabled, delay, note}`.
+- `Plugins: ManagerPlugin[]`: BPM's per-plugin record `{id, name, desc, group, tags[], enabled, startupTier, note}`.
   `name`/`desc` are *user-overridable* display values (seeded from the manifest). `group` is a single group id; `tags` many tag ids;
-  `delay` a `DELAYS[].id`.
-- `GROUPS` (type `Type`), `TAGS`, `DELAYS`: taxonomy lists referenced by id.
+  `startupTier` one of `native | after-ready | background` (src/startup-tiers.ts).
+- `STAGED_STARTUP`: start plugins by tier (was `DELAY`, "delay mode").
+- `GROUPS` (type `Type`), `TAGS`: taxonomy lists referenced by id. (`DELAYS`, the old named delay presets, is gone;
+  see *Startup tiers* below for the conversion.)
 - `HIDES`: plugin ids hidden from the manager list (display only).
 - `PLUGIN_LAYOUT`: manual ordering + named separators for the plugin list.
 - `REPO_MAP`: confirmed `pluginId → owner/repo`. `BPM_INSTALLED`: ids installed via BPM.
@@ -123,7 +128,7 @@ touches `app.plugins.enabledPlugins` (except the dead developer-mode buttons rel
 | **native startup list** | what Obsidian loads at launch | `enabledPlugins` + `saveConfig()`; *derived*: BPM itself + ignored plugins as left + (normal mode) every wanted plugin |
 | **loaded** | running now | `app.plugins.plugins[id]` |
 
-- Delay mode is a *policy* for the native list, not a second model. `setDelayMode()` only rewrites the list (no reloads).
+- Staged startup is a *policy* for the native list, not a second model. `setStagedStartup()` only rewrites the list (no reloads).
 - **Native toggles are adopted, not "taken over".** BPM never calls `*AndSave` and notes every load/unload it causes, so
   on `app.plugins` "changed": added to the native list → wanted; removed from it, or unloaded without BPM → not wanted.
   At launch, `start()` does the same for the list Obsidian just used. Obsidian's own toggle shows *running* state, so
@@ -137,26 +142,42 @@ touches `app.plugins.enabledPlugins` (except the dead developer-mode buttons rel
 - External `data.json` changes: Obsidian notifies only native-list plugins, so `start()` also subscribes to vault `raw`
   and forwards `onConfigFileChange()` to the running plugins BPM started (see internals table).
 
-### Delay-start mechanics
-- **When the delay clock starts:** Obsidian's startup order is core plugins → community plugins (`plugins.initialize()`,
-  each `enablePlugin` awaited in turn) → `vault.load()` → `metadataCache.initialize()` → `workspace.loadLayout()` →
-  opening behavior → layout-ready (then `onLayoutReady` callbacks, one per `sleep(0)`). BPM schedules its timers in its
-  own `onload`, i.e. during the community-plugin step, *before* the vault is even loaded, so short delays fire in the
-  middle of startup. Fractional delays work (`setTimeout(time * 1000)`), but the settings slider is integer 0–100.
-- Every launch with `DELAY=true`: Obsidian loads only BPM and ignored plugins; `PluginStartup.start()` schedules
-  `window.setTimeout(load, delay.time * 1000)` for each wanted managed plugin (0 if no delay profile). Same-delay plugins
-  fire together, not sequentially. (Step 2 of the refactor plan replaces this with startup tiers counted from layout-ready.)
-- Switching delay mode, or BPM being unloaded while delay is on (`stop()`): only the native list changes; nothing is
+### Startup tiers (staged startup)
+Since 2026-10-10. What matters is whether a plugin holds up the workspace becoming usable, so plugins start by stage,
+not after N seconds (Qyriad's framing: the delays were only ever a way to get plugins out of the blocking set).
+- **Obsidian's startup order** (verified 1.13.7): core plugins → community plugins (`plugins.initialize()`, each
+  `enablePlugin` awaited in turn) → `vault.load()` → `metadataCache.initialize()` → `workspace.loadLayout()` → opening
+  behavior → layout-ready (then `onLayoutReady` callbacks, one per `sleep(0)`). The old delay timers started in BPM's own
+  `onload`, i.e. *before the vault loaded*, so short delays fired mid-startup; same-delay plugins all fired at once.
+- Tiers: `native` = on Obsidian's native list (blocks ready). `after-ready` = BPM starts them at layout-ready, one at a
+  time in BPM's list order (`settings.Plugins` order), `setTimeout(0)` yield between. `background` = after all
+  after-ready ones, one at a time, each after `requestIdleCallback` (1 s timeout). A native-tier plugin that isn't on the
+  native list yet (first launch after converting) is started first at layout-ready. The tier is read when its turn
+  comes. Debug setting on → each start is logged with ms since layout-ready and onload duration.
+- Outside staged startup every wanted plugin is native, whatever its tier (tiers are kept).
+- Changing a tier: `PluginStartup.setStartupTier(ids, tier)` (edit-mode dropdown, bulk menu, right-click "Startup tier ▸"
+  submenu). Only the native list changes; nothing is reloaded.
+- **Conversion from delay presets** (`migrateDelaysToStartupTiers`, src/migrations.ts): runs on every load by *shape*
+  (old keys present), not `MIGRATION_VERSION`. First copies data.json byte-for-byte to
+  `data.before-startup-tiers.json` (once; never overwritten; if that fails, nothing is converted), then maps
+  no delay → native, < 5 s → after-ready, ≥ 5 s → background (agreed 2026-10-08), `DELAY` → `STAGED_STARTUP`, drops
+  `DELAYS`/`FILTER_DELAY*`, saves, and shows a persistent notice naming the backup.
+- After each late start BPM re-applies the saved ribbon layout (`RibbonLayoutKeeper`; see internals), and once more 2 s
+  after the last one, for plugins that add icons after onload.
+- Switching staged startup, or BPM being unloaded while it's on (`stop()`): only the native list changes; nothing is
   reloaded. `stop()` hands wanted plugins back to Obsidian and starts any still pending. Obsidian does **not** unload
   plugins on app quit (verified), so `stop()` only runs when BPM itself is disabled, reloaded or updated.
 
 ### Startup sequence (`Manager.onload`)
-1. `loadSettings` → `runMigrations` → pick language on first run → `new Translator`.
-2. Ensure built-in tags exist and normalise their names; ensure BPM's own record (always enabled, no delay, never hidden).
+1. `loadSettings` → `migrateDelaysToStartupTiers` (backup + convert, if old-format) → `runMigrations` → pick language on
+   first run → `new Translator` (→ conversion notice, if one happened).
+2. Ensure built-in tags exist and normalise their names; ensure BPM's own record (always enabled, native tier, never hidden).
 3. `new RepoResolver`; ribbon config sync or clear.
 4. `addRibbonIcon` + `NoteTipFeature`; `addSettingTab`.
-5. `synchronizePlugins` (reconcile `Plugins[]` with installed manifests), then `new PluginStartup(…).start()`: adopt the
-   native list Obsidian launched with, re-derive it, and in delay mode schedule the timed starts.
+5. Read the workspace file's `left-ribbon.hiddenItems` (`workspace.readWorkspaceFile()`) for `RibbonLayoutKeeper`, before
+   Obsidian loads and re-saves the layout. `synchronizePlugins` (reconcile `Plugins[]` with installed manifests), then
+   `new PluginStartup(…).start()`: adopt the native list Obsidian launched with, re-derive it, and with staged startup
+   queue the rest for layout-ready.
 6. `Commands(app, this)` registers commands; save if anything was dirty.
 7. `new Agreement` (**fetches the full community-plugins.json on every startup**), fire-and-forget
    `startupCheckForUpdates` and `startupMaintainBetaSources` (check + auto-update tracked sources).
@@ -175,7 +196,7 @@ All undocumented, typed loosely in `src/obsidian-internals.ts` or via `@ts-ignor
 | `app.plugins.manifests` | list installed plugins | populated by `loadManifests()`; **not** auto-refreshed when files appear on disk |
 | `app.plugins.enabledPlugins: Set` | "enabled" in normal mode | the **persisted** startup set, mirror of `community-plugins.json`; *not* "currently loaded" |
 | `app.plugins.plugins[id]` | detect loaded instance | the actually-loaded plugin objects |
-| `enablePlugin(id, userEnable?)` | delay start, single start | returns `Promise<boolean>` (BPM types it `void`). Returns `false` if `manifests[id]` is missing, restricted mode, deprecated/blocklisted, or desktop-only on mobile. Doesn't touch `enabledPlugins`. Idempotent (`loadPlugin` returns the existing instance). |
+| `enablePlugin(id, userEnable?)` | staged start, single start | returns `Promise<boolean>` (BPM types it `void`). Returns `false` if `manifests[id]` is missing, restricted mode, deprecated/blocklisted, or desktop-only on mobile. Doesn't touch `enabledPlugins`. Idempotent (`loadPlugin` returns the existing instance). |
 | `disablePlugin(id)` | | unload only |
 | `enablePluginAndSave` / `disablePluginAndSave` | normal-mode toggles | `enablePlugin(id,true)` then `enabledPlugins.add` + `requestSaveConfig()` (debounced 1 s) / `enabledPlugins.delete` + `requestSaveConfig()` + `disablePlugin(id,true)` |
 | `saveConfig()` | (not used by BPM) | writes `Array.from(enabledPlugins)` to `community-plugins.json` |
@@ -192,13 +213,14 @@ Consequences worth internalising:
 - Writing `community-plugins.json` directly (as the old self-check takeover did) leaves Obsidian's in-memory `enabledPlugins` stale, so the
   next `*AndSave` from anywhere rewrites the file from memory and silently undoes the takeover. The correct move is to mutate
   `app.plugins.enabledPlugins` and call `saveConfig()`/`requestSaveConfig()`.
-- Plugins started by BPM's delay mode are not in `enabledPlugins`, so Obsidian never calls their `onConfigFileChange()`
+- Plugins started by BPM (staged startup) are not in `enabledPlugins`, so Obsidian never calls their `onConfigFileChange()`
   (e.g. when Obsidian Sync updates their `data.json`). **Fixed** (2026-10-10): `PluginStartup.forwardConfigFileChange`
   listens to the same vault `raw` event and calls it for running plugins *not* on the native list, so each plugin is
   notified once, through Obsidian's own mtime check. Verified in the sandbox. Plugins that don't implement
   `onExternalSettingsChange` ignore external changes either way (natively too).
-- Editing the startup list doesn't require reloading plugins at all (see the delay toggle above).
-- **Why hidden ribbon icons of delay-loaded plugins come back** (any lazy loader, not just BPM): at layout load the
+- Editing the startup list doesn't require reloading plugins at all (see the staged-startup toggle above).
+- **Why hidden ribbon icons of late-started plugins came back** (any lazy loader, not just BPM; fixed for BPM's own late
+  starts by `RibbonLayoutKeeper`, src/ribbon-state.ts): at layout load the
   plugin's ribbon item doesn't exist yet, so `leftRibbon.load()` skips its saved `hidden: true`; when the plugin later
   calls `addRibbonIcon`, a fresh visible item is appended at the end, and the next layout save persists it as visible.
 
@@ -224,10 +246,10 @@ python3 -c "s=open('app/app.js').read(); i=s.find('enablePluginAndSave='); print
   `PluginCardController` so single cards can be refreshed (`refreshPluginCard`) without a full re-render.
 - Card actions are configurable to sit on the card or in the right-click menu (`MAIN_PAGE_ACTION_PLACEMENT`, settings page
   "主页面功能"). The action wiring is written out three times: desktop context menu (~3205), mobile menu (~3674), on-card buttons (~3818).
-- Filters: status / group / tag / delay, each multi-select with `contains | not-contains`; optionally persisted
+- Filters: status / group / tag / startup tier, each multi-select with `contains | not-contains`; optionally persisted
   (`PERSISTENCE`, `FILTER_*`). Search is debounced (120 ms render, 350 ms persist).
 - Modes: `editorMode` (edit names/descs/layout, separators, drag reorder via custom pointer-drag), `bulkEditMode`
-  (multi-select → group/tags/delay/enable/disable). `developerMode` is never set to true (dead buttons).
+  (multi-select → group/tags/startup tier/enable/disable). `developerMode` is never set to true (dead buttons).
 - House style shared by all modals: remove Obsidian's `.modal-close-button`, build a custom title bar from `Setting`.
 
 ### Install & update pipeline
@@ -308,14 +330,16 @@ update and transfer import ignoring delay mode · import writing data.json under
 reloading every plugin · the takeover prompt (replaced by adopting native toggles; native *disable* of a BPM-started
 plugin is adopted too [R]) · six disagreeing "is it enabled?" implementations · start once / restart unavailable in delay mode.
 
+### Fixed on `refactor/plugin-startup` (2026-10-10)
+External data.json changes (Sync etc.) never reaching BPM-started plugins · hidden ribbon icons of late-started plugins
+coming back [R] · delay timers starting mid-startup and same-delay plugins firing at once (now tiers from layout-ready,
+one at a time) · sub-second delays not settable (moot: no seconds any more) · startup tier settable only in edit/bulk
+mode (now also the right-click menu, without losing scroll).
+
 ### Correctness (open)
-5. [C] Delay timers start during community-plugin init, before vault/layout load (see *Delay-start mechanics*).
-6. [C][R] Hidden ribbon icons of delay-loaded plugins reappear (native `leftRibbon.load` behaviour, see internals); BPM's
-   own ribbon manager matches by aria-label text and doesn't address it. Reproduced with two fake plugins (one native,
-   one BPM-delayed); re-applying the pre-startup `hiddenItems` snapshot via `leftRibbon.load()` after the delayed load
-   was confirmed to hide the icon again and persist `hidden: true`.
-7. [C] Entering edit mode re-renders the whole plugin page (`renderContent()` → `pageEl.empty()`), losing scroll; edit-mode
-   cards have no enable toggle; the context menu has no enable/disable or delay actions.
+7. [C][R] Entering edit mode re-renders the whole plugin page (`renderContent()` → `pageEl.empty()`), losing scroll
+   (Qyriad confirmed on the branch, 2026-10-10); edit-mode cards have no enable toggle; the context menu has no
+   enable/disable action. (Startup tier is in the context menu now.)
 
 ### Security / trust (open)
 - [C] `obsidian://BPM-plugin-install?id=<community id>&enable=true` installs **and enables** a plugin with no
@@ -325,11 +349,10 @@ plugin is adopted too [R]) · six disagreeing "is it enabled?" implementations �
 - [C] `Agreement`'s constructor downloads the full community plugin list on every startup (unconditional network);
   `RepoResolver` separately fetches and caches the same list.
 - [C] Update checks are sequential per plugin and fetch a manifest for every release of every plugin.
-- [C] All delayed plugins with the same delay are started at once (one timer each), not sequentially.
 
 ### Structure / smells
 - `manager-modal.ts` is an 8k-line god object.
-- `settings/ui/manager-group.ts`, `manager-tag.ts`, `manager-delay.ts` are near-copies.
+- `settings/ui/manager-group.ts` and `manager-tag.ts` are near-copies (`manager-delay.ts` is gone).
 - Dead code: `vault-share.ts` (stub) + all `vaults` page UI, `SystemRibbonManager`, `DisableModal`, `developerMode`
   buttons, `getActivePlugins/processPlugins` (with `console.log`, and an `obsidian://BPM-install` link to a handler that
   doesn't exist), `applyRibbonConfigToMemory` ignores its arguments, `savePluginAndExport` is just `saveSettings`.
