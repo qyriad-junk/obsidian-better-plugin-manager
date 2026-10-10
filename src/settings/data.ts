@@ -1,4 +1,4 @@
-import { BetaSource, Delay, InstallHistoryItem, ManagerPlugin, PluginLayoutItem, RibbonItem, SharedVaultEntry, Tag, Type } from '../data/types';
+import { BetaSource, InstallHistoryItem, ManagerPlugin, PluginLayoutItem, RibbonItem, SharedVaultEntry, Tag, Type } from '../data/types';
 import { TroubleshootState } from '../troubleshoot/troubleshoot-state';
 
 export const MAIN_PAGE_ACTION_IDS = [
@@ -90,8 +90,11 @@ export interface ManagerSettings {
     PERSISTENCE: boolean;
     /** 管理器弹窗是否居中显示；关闭时桌面端会偏上显示。 */
     CENTER: boolean;
-    /** 是否启用 BPM 延迟启动模式；开启后插件启用状态由 BPM 记录驱动。 */
-    DELAY: boolean;
+    /**
+     * Staged startup: start each plugin according to its startup tier (see src/startup-tiers.ts). Off: every enabled
+     * plugin starts with Obsidian. (Was `DELAY`, delay mode; converted on load.)
+     */
+    STAGED_STARTUP: boolean;
     /** 是否在插件卡片中隐藏 BPM 内置标签，例如 BPM 管理标识和 BPM 忽略。 */
     HIDE_BPM_TAG: boolean;
     /** 是否启用边栏编排接管；关闭时 BPM 不再排序或隐藏 Ribbon 图标。 */
@@ -143,10 +146,9 @@ export interface ManagerSettings {
     FILTER_TAG: string;
     FILTER_TAG_VALUES?: string[];
     FILTER_TAG_OPERATOR: FilterOperator;
-    /** 持久化的延迟配置筛选 id，仅在 PERSISTENCE 与 DELAY 开启时生效。 */
-    FILTER_DELAY: string;
-    FILTER_DELAY_VALUES?: string[];
-    FILTER_DELAY_OPERATOR: FilterOperator;
+    /** Persisted startup-tier filter (only with PERSISTENCE and STAGED_STARTUP on). */
+    FILTER_STARTUP_TIER_VALUES?: string[];
+    FILTER_STARTUP_TIER_OPERATOR: FilterOperator;
 
     // 样式设置页
     /** 插件总览的显示模式：列表或双列。 */
@@ -161,16 +163,14 @@ export interface ManagerSettings {
     /** 是否降低禁用插件卡片的不透明度，方便视觉区分启用状态。 */
     FADE_OUT_DISABLED_PLUGINS: boolean;
 
-    // 分组 / 标签 / 延迟设置页
+    // 分组 / 标签设置页
     /** 用户自定义分组列表；插件记录通过 group 字段引用这里的 id。 */
     GROUPS: Type[];
     /** 用户自定义标签列表；插件记录通过 tags 数组引用这里的 id。 */
     TAGS: Tag[];
-    /** 延迟启动配置列表；插件记录通过 delay 字段引用这里的 id。 */
-    DELAYS: Delay[];
 
     // 插件管理页
-    /** BPM 管理的插件主数据，保存插件名、描述、分组、标签、启用状态、延迟和备注。 */
+    /** BPM 管理的插件主数据，保存插件名、描述、分组、标签、启用状态、启动阶段和备注。 */
     Plugins: ManagerPlugin[];
     /** 在管理页隐藏的插件 id 列表；只影响 BPM 管理页展示，不卸载插件。 */
     HIDES: string[];
@@ -248,7 +248,7 @@ export const DEFAULT_SETTINGS: ManagerSettings = {
     // 基础设置页
     PERSISTENCE: false,
     CENTER: false,
-    DELAY: false,
+    STAGED_STARTUP: false,
     HIDE_BPM_TAG: false,
     RIBBON_MANAGER_ENABLED: false,
     MAIN_PAGE_ACTION_PLACEMENT: { ...DEFAULT_MAIN_PAGE_ACTION_PLACEMENT },
@@ -278,9 +278,8 @@ export const DEFAULT_SETTINGS: ManagerSettings = {
     FILTER_TAG: "",
     FILTER_TAG_VALUES: [],
     FILTER_TAG_OPERATOR: "contains",
-    FILTER_DELAY: "",
-    FILTER_DELAY_VALUES: [],
-    FILTER_DELAY_OPERATOR: "contains",
+    FILTER_STARTUP_TIER_VALUES: [],
+    FILTER_STARTUP_TIER_OPERATOR: "contains",
 
     // 样式设置页
     PLUGIN_OVERVIEW_LAYOUT: "list",
@@ -290,16 +289,9 @@ export const DEFAULT_SETTINGS: ManagerSettings = {
     TAG_STYLE: "b",
     FADE_OUT_DISABLED_PLUGINS: true,
 
-    // 分组 / 标签 / 延迟设置页
+    // 分组 / 标签设置页
     GROUPS: [],
     TAGS: [],
-    DELAYS: [
-        {
-            "id": "default",
-            "name": "Default delay",
-            "time": 10
-        },
-    ],
 
     // 插件管理页
     Plugins: [],

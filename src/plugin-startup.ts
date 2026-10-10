@@ -1,8 +1,8 @@
 import type { EventRef } from "obsidian";
 import { BPM_IGNORE_TAG } from "./data/types";
-import type { Delay, ManagerPlugin } from "./data/types";
+import type { ManagerPlugin } from "./data/types";
 import type { ObsidianPluginRegistry } from "./obsidian-internals";
-import { STARTUP_TIERS, tierForLegacyDelay } from "./startup-tiers";
+import { DEFAULT_STARTUP_TIER, isStartupTier, STARTUP_TIERS } from "./startup-tiers";
 import type { StartupTier } from "./startup-tiers";
 
 /**
@@ -11,10 +11,10 @@ import type { StartupTier } from "./startup-tiers";
  * Three things that are easy to conflate, kept apart here:
  *
  * - **wanted**: the user wants this plugin running in this vault. The source of truth is BPM's own record
- *   (`ManagerPlugin.enabled`), in delay mode and outside it alike.
+ *   (`ManagerPlugin.enabled`), in staged-startup mode and outside it alike.
  * - **native startup list**: what Obsidian itself loads at launch, i.e. `app.plugins.enabledPlugins`, persisted to
  *   community-plugins.json by `saveConfig()`. BPM *derives* it: BPM itself, `bpm-ignore` plugins as the user left
- *   them, and every wanted plugin, except, in staged-startup ("delay") mode, those whose {@link StartupTier} says
+ *   them, and every wanted plugin, except, in staged-startup mode, those whose {@link StartupTier} says
  *   BPM starts them after the workspace is ready.
  * - **loaded**: running right now (`app.plugins.plugins[id]`).
  *
@@ -40,7 +40,7 @@ export interface PluginStartupHost {
 	readonly selfId: string;
 	readonly registry: PluginStartupRegistry;
 	/** Read on every use, since the settings object can be replaced (e.g. by a transfer-pack import). */
-	readonly settings: { DELAY: boolean; DELAYS: Delay[]; Plugins: ManagerPlugin[] };
+	readonly settings: { STAGED_STARTUP: boolean; Plugins: ManagerPlugin[] };
 	/** Persist BPM's settings (data.json). */
 	saveSettings(): Promise<void>;
 	/** Create the BPM record for an installed plugin that doesn't have one yet. */
@@ -127,13 +127,13 @@ export class PluginStartup {
 
 	/** When this plugin starts in staged-startup mode. */
 	getStartupTier(id: string): StartupTier {
-		const delayId = this.getRecord(id)?.delay;
-		return tierForLegacyDelay(this.host.settings.DELAYS.find((delay) => delay.id === delayId)?.time);
+		const tier = this.getRecord(id)?.startupTier;
+		return isStartupTier(tier) ? tier : DEFAULT_STARTUP_TIER;
 	}
 
 	/** Whether BPM (rather than Obsidian) will start this plugin at the next launch. */
 	isStartedByBpm(id: string): boolean {
-		return this.host.settings.DELAY && this.isManaged(id) && this.getStartupTier(id) !== "native";
+		return this.host.settings.STAGED_STARTUP && this.isManaged(id) && this.getStartupTier(id) !== "native";
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -188,7 +188,7 @@ export class PluginStartup {
 	 * Adopt changes BPM didn't make: the user toggled a plugin in Obsidian's own settings (or the CLI). Called on
 	 * every `app.plugins` "changed" event.
 	 *
-	 * - Added to the native list: wanted. (In delay mode, the next reconcile hands it back to BPM; it keeps running,
+	 * - Added to the native list: wanted. (In staged-startup mode, the next reconcile hands it back to BPM; it keeps running,
 	 *   so Obsidian's toggle, which shows running state, doesn't flip back.)
 	 * - Removed from the native list, or unloaded without BPM doing it: not wanted.
 	 *
@@ -296,11 +296,11 @@ export class PluginStartup {
 	 * Called once from BPM's onload, after records have been reconciled with the installed plugins.
 	 *
 	 * 1. Adopt the native startup list Obsidian just launched with. Any BPM-managed plugin on it was enabled natively
-	 *    while BPM wasn't watching; outside delay mode, a managed plugin *missing* from it was disabled natively.
-	 *    (In delay mode a missing plugin is normal: BPM starts it.)
-	 * 2. Re-derive the native startup list (in delay mode this moves natively-enabled plugins under BPM's control
+	 *    while BPM wasn't watching; outside staged-startup mode, a managed plugin *missing* from it was disabled natively.
+	 *    (In staged-startup mode a missing plugin is normal: BPM may start it.)
+	 * 2. Re-derive the native startup list (in staged-startup mode this moves natively-enabled plugins under BPM's control
 	 *    from the next launch on, unless their tier is `native`).
-	 * 3. In delay mode, start the wanted plugins that Obsidian didn't, once the workspace is ready.
+	 * 3. In staged-startup mode, start the wanted plugins that Obsidian didn't, once the workspace is ready.
 	 * 4. Watch for native toggles from now on.
 	 */
 	async start(): Promise<void> {
@@ -311,14 +311,14 @@ export class PluginStartup {
 			if (!this.isManaged(id)) continue;
 			if (this.registry.enabledPlugins.has(id)) {
 				recordsChanged = this.setRecordWanted(id, true) || recordsChanged;
-			} else if (!this.host.settings.DELAY) {
+			} else if (!this.host.settings.STAGED_STARTUP) {
 				recordsChanged = this.setRecordWanted(id, false) || recordsChanged;
 			}
 		}
 		await this.syncNativeStartupList();
 		if (recordsChanged) await this.host.saveSettings();
 
-		if (this.host.settings.DELAY) {
+		if (this.host.settings.STAGED_STARTUP) {
 			for (const id of Object.keys(this.registry.manifests)) {
 				if (this.isManaged(id) && this.isWanted(id) && !this.isLoaded(id)) this.pending.add(id);
 			}
@@ -408,7 +408,7 @@ export class PluginStartup {
 		const pending = this.pendingStarts();
 		for (const id of pending) this.cancelScheduledStart(id);
 
-		if (!this.host.settings.DELAY) return;
+		if (!this.host.settings.STAGED_STARTUP) return;
 		let added = false;
 		for (const record of this.host.settings.Plugins) {
 			if (!this.isManaged(record.id) || !record.enabled || !this.isInstalled(record.id)) continue;
@@ -492,11 +492,11 @@ export class PluginStartup {
 	}
 
 	/**
-	 * Switch delay (staged startup) mode. Only the native startup list changes (it takes effect at the next launch);
+	 * Switch staged-startup mode. Only the native startup list changes (it takes effect at the next launch);
 	 * nothing is unloaded or reloaded. Turning it off starts anything still waiting for its turn right away.
 	 */
-	async setDelayMode(enabled: boolean): Promise<void> {
-		this.host.settings.DELAY = enabled;
+	async setStagedStartup(enabled: boolean): Promise<void> {
+		this.host.settings.STAGED_STARTUP = enabled;
 		if (!enabled) {
 			const pending = this.pendingStarts();
 			for (const id of pending) {
@@ -506,6 +506,26 @@ export class PluginStartup {
 		}
 		await this.syncNativeStartupList();
 		await this.host.saveSettings();
+	}
+
+	/**
+	 * Set when plugins start in staged-startup mode. Takes effect at the next launch (the native startup list is
+	 * updated now); a plugin still waiting for its turn this launch goes by its new tier. `bpm-ignore` plugins and BPM
+	 * itself are skipped (Obsidian's native list decides for those). Returns the ids that were changed.
+	 */
+	async setStartupTier(ids: readonly string[], tier: StartupTier): Promise<string[]> {
+		const changed: string[] = [];
+		for (const id of ids) {
+			if (!this.isManaged(id) || !this.isInstalled(id)) continue;
+			const record = this.getRecord(id) ?? this.host.createRecord(id, this.isWanted(id));
+			if (record.startupTier === tier) continue;
+			record.startupTier = tier;
+			changed.push(id);
+		}
+		if (changed.length === 0) return changed;
+		await this.syncNativeStartupList();
+		await this.host.saveSettings();
+		return changed;
 	}
 
 	/**

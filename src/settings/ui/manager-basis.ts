@@ -52,12 +52,10 @@ export default class ManagerBasis extends BaseSetting {
             .setName(this.manager.translator.t("设置_基础设置_延时启动_标题"))
             .setDesc(this.manager.translator.t("设置_基础设置_延时启动_描述"));
         const DelayToggle = new ToggleComponent(DelayBar.controlEl);
-        DelayToggle.setValue(this.settings.DELAY);
+        DelayToggle.setValue(this.settings.STAGED_STARTUP);
         DelayToggle.onChange(async (value) => {
             // Only rewrites Obsidian's startup list (effective next launch); nothing is reloaded.
-            await this.manager.pluginStartup.setDelayMode(value);
-            // Rebuild the tab bar too: the Delay tab only exists while delay mode is on.
-            this.settingTab.renderSettings();
+            await this.manager.pluginStartup.setStagedStartup(value);
         });
 
         heading("设置_基础设置_分组_更新来源");

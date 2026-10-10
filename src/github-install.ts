@@ -3,6 +3,7 @@ import type { PluginManifest, RequestUrlResponse } from "obsidian";
 import Manager from "main";
 import type { ManagerPlugin } from "./data/types";
 import { BPM_TAG_ID } from "./repo-resolver";
+import { DEFAULT_STARTUP_TIER } from "./startup-tiers";
 import { resolveGithubUrl } from "./github-url";
 import { getSafePathSegment } from "./path-safety";
 
@@ -291,7 +292,7 @@ const upsertInstalledPluginRecord = (
 		group: "",
 		tags: shouldHaveBpmTag ? [BPM_TAG_ID] : [],
 		enabled: manager.pluginStartup.isWanted(pluginId),
-		delay: "",
+		startupTier: DEFAULT_STARTUP_TIER,
 		note: "",
 	};
 	manager.applySpecialPluginTags(record);

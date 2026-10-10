@@ -11453,10 +11453,9 @@ body.theme-dark .manager-transfer-segment[data-state="active"]:hover {
     }
 }
 
-/* Unified taxonomy settings: groups, tags, and delay presets. */
+/* Unified taxonomy settings: groups and tags. */
 .manager-setting-group__container.manager-taxonomy-setting,
-.manager-setting-tag__container.manager-taxonomy-setting,
-.manager-setting-delay__container.manager-taxonomy-setting {
+.manager-setting-tag__container.manager-taxonomy-setting {
     gap: 12px;
     padding: 2px 0 4px;
 }
@@ -11603,8 +11602,7 @@ body.theme-dark .manager-transfer-segment[data-state="active"]:hover {
     min-width: 0;
 }
 
-.manager-taxonomy-setting__preview.manager-tag,
-.manager-setting-delay__preview.manager-taxonomy-setting__preview {
+.manager-taxonomy-setting__preview.manager-tag {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -11615,18 +11613,7 @@ body.theme-dark .manager-transfer-segment[data-state="active"]:hover {
     line-height: 1.2;
 }
 
-.manager-setting-delay__preview.manager-taxonomy-setting__preview {
-    min-width: 48px;
-    padding: 2px 9px;
-    border: 1px solid color-mix(in srgb, var(--interactive-accent) 24%, var(--bpm-border));
-    background: var(--bpm-accent-soft);
-    color: var(--text-accent);
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-}
-
-.manager-taxonomy-setting__id,
-.manager-setting-delay__name {
+.manager-taxonomy-setting__id {
     min-width: 0;
     overflow-wrap: anywhere;
 }
@@ -11635,12 +11622,6 @@ body.theme-dark .manager-transfer-segment[data-state="active"]:hover {
     color: var(--text-faint);
     font-family: var(--font-monospace);
     font-size: 11px;
-}
-
-.manager-setting-delay__name {
-    color: var(--text-normal);
-    font-size: 13px;
-    font-weight: 650;
 }
 
 .manager-taxonomy-setting__meta {
@@ -11682,11 +11663,6 @@ body.theme-dark .manager-transfer-segment[data-state="active"]:hover {
     box-shadow: 0 0 0 2px var(--bpm-ring);
 }
 
-.manager-setting-delay__slider {
-    width: 150px;
-    min-width: 120px;
-}
-
 .manager-taxonomy-setting .clickable-icon,
 .manager-taxonomy-setting button {
     border-radius: var(--bpm-radius-sm);
@@ -11717,8 +11693,7 @@ body.theme-dark .manager-transfer-segment[data-state="active"]:hover {
         width: 100%;
     }
 
-    .manager-taxonomy-setting__input,
-    .manager-setting-delay__slider {
+    .manager-taxonomy-setting__input {
         width: min(100%, 220px);
         flex: 1 1 150px;
     }

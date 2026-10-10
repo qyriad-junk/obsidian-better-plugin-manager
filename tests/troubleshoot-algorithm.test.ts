@@ -11,13 +11,13 @@ const BPM = "better-plugins-manager";
 
 type Culprit = { kind: "single"; a: string } | { kind: "pair"; a: string; b: string };
 
-/** All plugins installed and enabled, then Obsidian + BPM launched, in normal or delay mode. */
-async function setup(pluginCount: number, delayMode: boolean) {
+/** All plugins installed and enabled, then Obsidian + BPM launched, normally or with staged startup (all BPM-started). */
+async function setup(pluginCount: number, staged: boolean) {
 	const plugins = new FakePluginManager();
 	const ids = Array.from({ length: pluginCount }, (_, i) => `p${i}`);
 	for (const id of [BPM, ...ids]) plugins.install(id);
 	plugins.communityPluginsOnDisk = [BPM, ...ids];
-	const settings = { DELAY: delayMode, DELAYS: [], Plugins: [] as ManagerPlugin[] };
+	const settings = { STAGED_STARTUP: staged, Plugins: [] as ManagerPlugin[] };
 	await plugins.startup();
 	const manager = {
 		manifest: { id: BPM },
@@ -36,7 +36,7 @@ async function setup(pluginCount: number, delayMode: boolean) {
 		onLayoutReady: (callback) => callback(),
 		log: () => {},
 		createRecord: (id, wanted) => {
-			const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: "", note: "" };
+			const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, startupTier: staged ? "after-ready" : "native", note: "" };
 			settings.Plugins.push(record);
 			return record;
 		},
@@ -61,8 +61,8 @@ const describeCulprit = (culprit: Culprit) =>
  * Answer honestly until the algorithm finishes. If `wrongAt` is set, give the wrong answer at that step, check
  * that undo restores both the enabled plugins and the algorithm state, then carry on honestly.
  */
-async function diagnose(pluginCount: number, culprit: Culprit, wrongAt: number | null, delayMode = false): Promise<string> {
-	const { plugins, algorithm } = await setup(pluginCount, delayMode);
+async function diagnose(pluginCount: number, culprit: Culprit, wrongAt: number | null, staged = false): Promise<string> {
+	const { plugins, algorithm } = await setup(pluginCount, staged);
 	const state: TroubleshootState = algorithm.initState();
 	await algorithm.startTroubleshoot(state);
 
@@ -103,7 +103,7 @@ describe("TroubleshootAlgorithm", () => {
 		}
 	});
 
-	test.each([3, 8])("works the same in delay mode (%i plugins)", async (n) => {
+	test.each([3, 8])("works the same with staged startup (%i plugins)", async (n) => {
 		for (const culprit of culpritsFor(n)) {
 			expect(await diagnose(n, culprit, null, true)).toBe(describeCulprit(culprit));
 		}

@@ -2,7 +2,6 @@ import { normalizePath, PluginManifest } from "obsidian";
 import type Manager from "main";
 import {
 	BetaSource,
-	Delay,
 	InstallHistoryItem,
 	ManagerPlugin,
 	PluginLayoutItem,
@@ -10,6 +9,8 @@ import {
 	Tag,
 	Type,
 } from "./data/types";
+import { DEFAULT_STARTUP_TIER, isStartupTier } from "./startup-tiers";
+import type { LegacyDelayPreset, StartupTier } from "./startup-tiers";
 import { installPluginFromGithub, installThemeFromGithub, sanitizeRepo } from "./github-install";
 import { getSafePathSegment } from "./path-safety";
 
@@ -63,7 +64,7 @@ export interface ManagerTransferPlugin {
 	enabled?: boolean;
 	group?: string;
 	tags?: string[];
-	delay?: string;
+	startupTier?: StartupTier;
 	note?: string;
 	customDescription?: string;
 	installedViaBpm?: boolean;
@@ -128,7 +129,9 @@ export interface ManagerTransferPluginConfig {
 
 export interface ManagerTransferWorkspaceSettings {
 	persistence: boolean;
-	delayMode: boolean;
+	/** Staged startup (`STAGED_STARTUP`); packages from before startup tiers have `delayMode` instead. */
+	stagedStartup?: boolean;
+	delayMode?: boolean;
 	hideBpmTag: boolean;
 	startupCheckUpdates: boolean;
 	pluginOverviewLayout?: string;
@@ -153,7 +156,8 @@ export interface ManagerTransferPackage {
 		pluginConfigs?: number;
 		groups: number;
 		tags: number;
-		delays: number;
+		/** Only in packages from before startup tiers. */
+		delays?: number;
 		sources: number;
 		ribbonItems: number;
 		layoutItems: number;
@@ -165,7 +169,8 @@ export interface ManagerTransferPackage {
 		pluginConfigs?: ManagerTransferPluginConfig[];
 		groups: Type[];
 		tags: Tag[];
-		delays: Delay[];
+		/** Delay presets; only in packages from before startup tiers, and not imported. */
+		delays?: LegacyDelayPreset[];
 		repoMap: Record<string, string>;
 		bpmInstalled: string[];
 		betaSources: BetaSource[];
@@ -193,7 +198,6 @@ export interface ManagerTransferPreview {
 	pluginConfigs: number;
 	groups: number;
 	tags: number;
-	delays: number;
 	sources: number;
 	layoutItems: number;
 	ribbonItems: number;
@@ -703,7 +707,7 @@ export const buildManagerTransferPackage = async (
 				group: "",
 				tags: [],
 				enabled: manager.appPlugins.enabledPlugins.has(manifest.id),
-				delay: "",
+				startupTier: DEFAULT_STARTUP_TIER,
 				note: "",
 			},
 		}));
@@ -769,7 +773,6 @@ export const buildManagerTransferPackage = async (
 	const ribbonSettings = options.layout ? cloneJson(manager.settings.RIBBON_SETTINGS || []) : [];
 	const groups = options.taxonomy ? cloneJson(manager.settings.GROUPS || []) : [];
 	const tags = options.taxonomy ? cloneJson(manager.settings.TAGS || []) : [];
-	const delays = options.taxonomy ? cloneJson(manager.settings.DELAYS || []) : [];
 	const repoMap = options.sources || options.plugins
 		? Object.fromEntries(Object.entries(manager.settings.REPO_MAP || {})
 			.filter(([pluginId]) => exportedPluginIds.has(pluginId)))
@@ -783,7 +786,7 @@ export const buildManagerTransferPackage = async (
 	})) : [];
 	const workspaceSettings = options.workspaceSettings ? {
 		persistence: Boolean(manager.settings.PERSISTENCE),
-		delayMode: Boolean(manager.settings.DELAY),
+		stagedStartup: Boolean(manager.settings.STAGED_STARTUP),
 		hideBpmTag: Boolean(manager.settings.HIDE_BPM_TAG),
 		startupCheckUpdates: Boolean(manager.settings.STARTUP_CHECK_UPDATES),
 		pluginOverviewLayout: manager.settings.PLUGIN_OVERVIEW_LAYOUT,
@@ -808,7 +811,6 @@ export const buildManagerTransferPackage = async (
 			pluginConfigs: pluginConfigs.length,
 			groups: groups.length,
 			tags: tags.length,
-			delays: delays.length,
 			sources: sources.length,
 			ribbonItems: ribbonSettings.length,
 			layoutItems: pluginLayout.length,
@@ -820,7 +822,6 @@ export const buildManagerTransferPackage = async (
 			pluginConfigs,
 			groups,
 			tags,
-			delays,
 			repoMap,
 			bpmInstalled,
 			betaSources: sources,
@@ -877,7 +878,6 @@ export const createManagerTransferPreview = async (
 		pluginConfigs: pluginConfigs.length,
 		groups: (transferPackage.data.groups || []).length,
 		tags: (transferPackage.data.tags || []).length,
-		delays: (transferPackage.data.delays || []).length,
 		sources: (transferPackage.data.betaSources || []).length,
 		layoutItems: (transferPackage.data.pluginLayout || []).length,
 		ribbonItems: (transferPackage.data.ribbonSettings || []).length,
@@ -945,7 +945,7 @@ const upsertPluginRecord = (
 			tags: [],
 			// On/off is PluginStartup's business (and only taken from the package if the import applies enabled states).
 			enabled: manager.pluginStartup.isWanted(plugin.id),
-			delay: "",
+			startupTier: DEFAULT_STARTUP_TIER,
 			note: "",
 		};
 		manager.settings.Plugins.push(record);
@@ -956,7 +956,7 @@ const upsertPluginRecord = (
 		record.desc = plugin.customDescription || plugin.description || record.desc;
 		record.group = plugin.group || "";
 		record.tags = [...(plugin.tags || [])];
-		record.delay = plugin.delay || "";
+		if (isStartupTier(plugin.startupTier)) record.startupTier = plugin.startupTier;
 		record.note = plugin.note || "";
 	}
 	return record;
@@ -1009,8 +1009,9 @@ export const applyManagerTransferPackage = async (
 	if (options.applyWorkspaceSettings && transferPackage.data.workspaceSettings) {
 		const workspace = transferPackage.data.workspaceSettings;
 		manager.settings.PERSISTENCE = workspace.persistence;
-		// Switching delay mode has to rewrite Obsidian's startup list, not just flip the flag.
-		if (manager.settings.DELAY !== Boolean(workspace.delayMode)) await manager.pluginStartup.setDelayMode(Boolean(workspace.delayMode));
+		// Switching staged startup has to rewrite Obsidian's startup list, not just flip the flag.
+		const stagedStartup = Boolean(workspace.stagedStartup ?? workspace.delayMode);
+		if (manager.settings.STAGED_STARTUP !== stagedStartup) await manager.pluginStartup.setStagedStartup(stagedStartup);
 		manager.settings.HIDE_BPM_TAG = workspace.hideBpmTag;
 		manager.settings.STARTUP_CHECK_UPDATES = workspace.startupCheckUpdates;
 		manager.settings.PLUGIN_OVERVIEW_LAYOUT = workspace.pluginOverviewLayout === "two-column"
@@ -1027,7 +1028,6 @@ export const applyManagerTransferPackage = async (
 	if (options.applyPluginMetadata) {
 		mergeById(manager.settings.GROUPS, transferPackage.data.groups || []);
 		mergeById(manager.settings.TAGS, transferPackage.data.tags || []);
-		mergeById(manager.settings.DELAYS, transferPackage.data.delays || []);
 		result.settingsMerged = true;
 	}
 

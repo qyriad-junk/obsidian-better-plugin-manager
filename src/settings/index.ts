@@ -3,7 +3,6 @@ import Manager from "../main";
 
 import ManagerBasis from './ui/manager-basis';
 import ManagerStyle from './ui/manager-style';
-import ManagerDelay from './ui/manager-delay';
 import ManagerTag from './ui/manager-tag';
 import ManagerGroup from './ui/manager-group';
 import ManagerMainPage from './ui/manager-main-page';
@@ -43,7 +42,6 @@ class ManagerSettingTab extends PluginSettingTab {
             { text: this.manager.translator.t('设置_标签设置_前缀'), content: () => this.tagDisplay() },
 
         ];
-        if (this.manager.settings.DELAY) tabItems.push({ text: this.manager.translator.t('设置_延迟设置_前缀'), content: () => this.delayDisplay() });
 
         const tabItemsEls: HTMLButtonElement[] = [];
 
@@ -81,7 +79,6 @@ class ManagerSettingTab extends PluginSettingTab {
     basisDisplay() { this.contentEl.empty(); new ManagerBasis(this).render(); }
     mainPageDisplay() { this.contentEl.empty(); new ManagerMainPage(this).render(); }
     styleDisplay() { this.contentEl.empty(); new ManagerStyle(this).render(); }
-    delayDisplay() { this.contentEl.empty(); new ManagerDelay(this).render(); }
     groupDisplay() { this.contentEl.empty(); new ManagerGroup(this).render(); }
     tagDisplay() { this.contentEl.empty(); new ManagerTag(this).render(); }
 }

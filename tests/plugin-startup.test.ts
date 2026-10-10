@@ -3,6 +3,7 @@ import { PluginStartup } from "../src/plugin-startup";
 import type { PluginStartupHost, PluginStartupRegistry } from "../src/plugin-startup";
 import type { ManagerPlugin } from "../src/data/types";
 import { BPM_IGNORE_TAG } from "../src/data/types";
+import type { StartupTier } from "../src/startup-tiers";
 import { FakePluginManager } from "./support/fake-plugin-manager";
 
 const BPM = "better-plugins-manager";
@@ -10,18 +11,18 @@ const BPM = "better-plugins-manager";
 /** A vault: Obsidian's plugin manager plus BPM's settings, which survive "restarts" like data.json does. */
 class Vault {
 	plugins = new FakePluginManager();
-	settings = { DELAY: false, DELAYS: [{ id: "soon", name: "Soon", time: 0.5 }, { id: "later", name: "Later", time: 5 }], Plugins: [] as ManagerPlugin[] };
+	settings = { STAGED_STARTUP: false, Plugins: [] as ManagerPlugin[] };
 	saves = 0;
 	layoutSyncs = 0;
 	startup!: PluginStartup;
 	private layoutReady = false;
 	private onReady: (() => void)[] = [];
 
-	/** Delay profile given to records BPM creates. "" maps to the `native` tier, "soon" to `after-ready`. */
-	private newRecordDelay: string;
+	/** Startup tier given to records BPM creates. */
+	private newRecordTier: StartupTier;
 
-	constructor(ids: string[], { newRecordDelay = "" } = {}) {
-		this.newRecordDelay = newRecordDelay;
+	constructor(ids: string[], { newRecordTier = "native" as StartupTier } = {}) {
+		this.newRecordTier = newRecordTier;
 		this.plugins.install(BPM);
 		for (const id of ids) this.plugins.install(id);
 	}
@@ -48,7 +49,7 @@ class Vault {
 			},
 			log: () => {},
 			createRecord: (id, wanted) => {
-				const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: this.newRecordDelay, note: "" };
+				const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, startupTier: this.newRecordTier, note: "" };
 				this.settings.Plugins.push(record);
 				return record;
 			},
@@ -92,7 +93,7 @@ describe("normal mode", () => {
 	test("startup adopts the native startup list as what's wanted", async () => {
 		const vault = new Vault(["a", "b"]);
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
-		vault.settings.Plugins.push({ id: "b", name: "b", desc: "", group: "", tags: [], enabled: true, delay: "", note: "" });
+		vault.settings.Plugins.push({ id: "b", name: "b", desc: "", group: "", tags: [], enabled: true, startupTier: "native", note: "" });
 		await vault.launch();
 		expect(vault.startup.isWanted("a")).toBe(true);
 		// b's record said enabled, but Obsidian didn't start it: it was disabled natively while BPM wasn't looking.
@@ -125,15 +126,15 @@ describe("normal mode", () => {
 	});
 });
 
-describe("delay mode", () => {
+describe("staged startup", () => {
 	test("Obsidian starts BPM, ignored and native-tier plugins; BPM starts the rest once the layout is ready", async () => {
 		const vault = new Vault(["soon", "later", "with-obsidian", "ignored", "off"]);
 		vault.plugins.communityPluginsOnDisk = [BPM, "soon", "later", "with-obsidian", "ignored"];
 		await vault.launch();
-		vault.record("soon").delay = "soon";
-		vault.record("later").delay = "later";
+		vault.record("soon").startupTier = "after-ready";
+		vault.record("later").startupTier = "background";
 		await vault.startup.setIgnored("ignored", true);
-		await vault.startup.setDelayMode(true);
+		await vault.startup.setStagedStartup(true);
 
 		await vault.launch({ untilLayoutReady: false });
 		expect(vault.native()).toEqual([BPM, "ignored", "with-obsidian"].sort());
@@ -151,13 +152,13 @@ describe("delay mode", () => {
 	});
 
 	test("one plugin at a time: after-ready in list order, then background, native-tier stragglers first", async () => {
-		const vault = new Vault(["bg1", "r1", "bg2", "r2", "n1"], { newRecordDelay: "soon" });
-		vault.settings.DELAY = true;
+		const vault = new Vault(["bg1", "r1", "bg2", "r2", "n1"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "bg1", "r1", "bg2", "r2", "n1"];
 		await vault.launch(); // adopted; all BPM-started from the next launch
-		vault.record("bg1").delay = "later";
-		vault.record("bg2").delay = "later";
-		vault.record("n1").delay = ""; // native tier, but (like right after upgrading BPM) not on the native list
+		vault.record("bg1").startupTier = "background";
+		vault.record("bg2").startupTier = "background";
+		vault.record("n1").startupTier = "native"; // native tier, but (like right after upgrading BPM) not on the native list
 		await vault.startup.reconcile();
 		vault.plugins.communityPluginsOnDisk = [BPM];
 		await vault.launch({ untilLayoutReady: false });
@@ -173,15 +174,15 @@ describe("delay mode", () => {
 	});
 
 	test("a pending plugin's tier is read when its turn comes", async () => {
-		const vault = new Vault(["a", "b"], { newRecordDelay: "soon" });
-		vault.settings.DELAY = true;
+		const vault = new Vault(["a", "b"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "a", "b"];
 		await vault.launch();
-		vault.record("a").delay = "later";
+		vault.record("a").startupTier = "background";
 		await vault.launch({ untilLayoutReady: false });
 		expect(vault.startup.pendingStarts()).toEqual(["b", "a"]);
-		vault.record("a").delay = "soon";
-		vault.record("b").delay = "later";
+		vault.record("a").startupTier = "after-ready";
+		vault.record("b").startupTier = "background";
 		vault.finishLayout();
 		await settle();
 		await settle();
@@ -189,8 +190,8 @@ describe("delay mode", () => {
 	});
 
 	test("late starts re-apply the saved workspace layout (ribbon) around each load", async () => {
-		const vault = new Vault(["a"], { newRecordDelay: "soon" });
-		vault.settings.DELAY = true;
+		const vault = new Vault(["a"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 		await vault.launch();
 		await vault.launch();
@@ -202,47 +203,47 @@ describe("delay mode", () => {
 		expect(vault.layoutSyncs).toBe(3);
 	});
 
-	test("delay starts aren't user-initiated (no onUserEnable)", async () => {
-		const vault = new Vault(["a"], { newRecordDelay: "soon" });
+	test("staged starts aren't user-initiated (no onUserEnable)", async () => {
+		const vault = new Vault(["a"], { newRecordTier: "after-ready" });
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
-		vault.settings.DELAY = true;
+		vault.settings.STAGED_STARTUP = true;
 		await vault.launch(); // a was on the native list: adopted, moved under BPM from the next launch
 		await vault.launch();
 		await settle();
 		expect(vault.plugins.plugins.a?.userEnabled).toBe(false);
 	});
 
-	test("switching delay mode never reloads anything", async () => {
-		const vault = new Vault(["a", "b"], { newRecordDelay: "soon" });
+	test("switching staged startup never reloads anything", async () => {
+		const vault = new Vault(["a", "b"], { newRecordTier: "after-ready" });
 		vault.plugins.communityPluginsOnDisk = [BPM, "a", "b"];
 		await vault.launch();
 		const logBefore = vault.plugins.log.filter((entry) => entry !== "save").length;
 
-		await vault.startup.setDelayMode(true);
+		await vault.startup.setStagedStartup(true);
 		expect(vault.native()).toEqual([BPM]);
-		await vault.startup.setDelayMode(false);
+		await vault.startup.setStagedStartup(false);
 		expect(vault.native()).toEqual([BPM, "a", "b"].sort());
 
 		expect(vault.plugins.log.filter((entry) => entry !== "save").length).toBe(logBefore);
 		expect(vault.plugins.loaded()).toEqual([BPM, "a", "b"].sort());
 	});
 
-	test("turning delay mode off starts plugins still waiting on their delay", async () => {
+	test("turning staged startup off starts plugins still waiting for their turn", async () => {
 		const vault = new Vault(["a"]);
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 		await vault.launch();
-		vault.record("a").delay = "later";
-		await vault.startup.setDelayMode(true);
+		vault.record("a").startupTier = "background";
+		await vault.startup.setStagedStartup(true);
 		await vault.launch();
 		expect(vault.startup.pendingStarts()).toEqual(["a"]);
-		await vault.startup.setDelayMode(false);
+		await vault.startup.setStagedStartup(false);
 		expect(vault.plugins.loaded()).toEqual([BPM, "a"].sort());
 		expect(vault.startup.pendingStarts()).toEqual([]);
 	});
 
 	test("a plugin found on the native list at launch is taken over silently", async () => {
-		const vault = new Vault(["a", "b"], { newRecordDelay: "soon" });
-		vault.settings.DELAY = true;
+		const vault = new Vault(["a", "b"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"]; // e.g. enabled natively while BPM was disabled
 		await vault.launch();
 		expect(vault.startup.isWanted("a")).toBe(true);
@@ -254,8 +255,8 @@ describe("delay mode", () => {
 		const vault = new Vault(["a", "b", "off"]);
 		vault.plugins.communityPluginsOnDisk = [BPM, "a", "b"];
 		await vault.launch();
-		vault.record("b").delay = "later";
-		await vault.startup.setDelayMode(true);
+		vault.record("b").startupTier = "background";
+		await vault.startup.setStagedStartup(true);
 		await vault.launch();
 		await settle();
 		expect(vault.startup.pendingStarts()).toEqual(["b"]);
@@ -282,11 +283,11 @@ describe("native toggles (Obsidian's own settings / CLI)", () => {
 		expect(vault.startup.isWanted("a")).toBe(false);
 	});
 
-	test("in delay mode, switching off a BPM-started plugin natively (it's only unloaded) is adopted", async () => {
+	test("with staged startup, switching off a BPM-started plugin natively (it's only unloaded) is adopted", async () => {
 		// Obsidian's toggle shows running state, so a BPM-started plugin shows "on"; turning it off there calls
 		// disablePluginAndSave, which can't change the native list (the plugin isn't on it) and just unloads it.
-		const vault = new Vault(["a"], { newRecordDelay: "soon" });
-		vault.settings.DELAY = true;
+		const vault = new Vault(["a"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 		await vault.launch();
 		await vault.launch();
@@ -301,9 +302,9 @@ describe("native toggles (Obsidian's own settings / CLI)", () => {
 		expect(vault.plugins.loaded()).toEqual([BPM]);
 	});
 
-	test("a native enable in delay mode is handed back to BPM without stopping the plugin", async () => {
-		const vault = new Vault(["a"], { newRecordDelay: "soon" });
-		vault.settings.DELAY = true;
+	test("a native enable with staged startup is handed back to BPM without stopping the plugin", async () => {
+		const vault = new Vault(["a"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM];
 		await vault.launch();
 		await vault.plugins.enablePluginAndSave("a");
@@ -344,7 +345,7 @@ describe("native toggles (Obsidian's own settings / CLI)", () => {
 describe("bpm-ignore", () => {
 	test("ignored plugins follow the native list, and setWanted edits it directly", async () => {
 		const vault = new Vault(["x"]);
-		vault.settings.DELAY = true;
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM];
 		await vault.launch();
 		await vault.startup.setIgnored("x", true);
@@ -358,8 +359,8 @@ describe("bpm-ignore", () => {
 	});
 
 	test("adding or removing the tag anywhere is picked up by reconcile()", async () => {
-		const vault = new Vault(["x"], { newRecordDelay: "soon" });
-		vault.settings.DELAY = true;
+		const vault = new Vault(["x"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "x"];
 		await vault.launch(); // x adopted as wanted, moved under BPM
 		expect(vault.native()).toEqual([BPM]);
@@ -375,10 +376,10 @@ describe("bpm-ignore", () => {
 	});
 
 	test("un-ignoring takes the plugin back under BPM with its native state", async () => {
-		const vault = new Vault(["x"], { newRecordDelay: "soon" });
-		vault.settings.DELAY = true;
+		const vault = new Vault(["x"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "x"];
-		vault.settings.Plugins.push({ id: "x", name: "x", desc: "", group: "", tags: [BPM_IGNORE_TAG], enabled: false, delay: "soon", note: "" });
+		vault.settings.Plugins.push({ id: "x", name: "x", desc: "", group: "", tags: [BPM_IGNORE_TAG], enabled: false, startupTier: "after-ready", note: "" });
 		await vault.launch();
 		await vault.startup.setIgnored("x", false);
 		expect(vault.startup.isWanted("x")).toBe(true);
@@ -416,11 +417,11 @@ describe("installs and updates", () => {
 		expect(vault.plugins.log.filter((entry) => entry !== "save")).toEqual(["unload:a", "load:a"]);
 	});
 
-	test("in delay mode, an update doesn't put the plugin on the native list", async () => {
+	test("with staged startup, an update doesn't put the plugin on the native list", async () => {
 		const vault = new Vault(["a"]);
-		vault.settings.DELAY = true;
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM];
-		vault.settings.Plugins.push({ id: "a", name: "a", desc: "", group: "", tags: [], enabled: true, delay: "soon", note: "" });
+		vault.settings.Plugins.push({ id: "a", name: "a", desc: "", group: "", tags: [], enabled: true, startupTier: "after-ready", note: "" });
 		await vault.launch();
 		await settle();
 		await vault.startup.applyInstalledFiles("a");
@@ -441,9 +442,9 @@ describe("single start and restart", () => {
 	});
 
 	test("restart reloads without touching the native list, in either mode", async () => {
-		for (const delay of [false, true]) {
-			const vault = new Vault(["a"]);
-			vault.settings.DELAY = delay;
+		for (const staged of [false, true]) {
+			const vault = new Vault(["a"], { newRecordTier: "after-ready" });
+			vault.settings.STAGED_STARTUP = staged;
 			vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 			await vault.launch();
 			await settle();
@@ -458,8 +459,8 @@ describe("single start and restart", () => {
 
 describe("external settings changes (data.json changed on disk, e.g. by Sync)", () => {
 	test("reach BPM-started plugins exactly once, and native ones only via Obsidian", async () => {
-		const vault = new Vault(["native", "delayed"]);
-		vault.settings.DELAY = true;
+		const vault = new Vault(["native", "delayed"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "native", "delayed"];
 		await vault.launch();
 		await vault.startup.setIgnored("native", true);
@@ -475,7 +476,7 @@ describe("external settings changes (data.json changed on disk, e.g. by Sync)", 
 
 	test("ignore other files, and plugins that aren't running", async () => {
 		const vault = new Vault(["a", "off"]);
-		vault.settings.DELAY = true;
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 		await vault.launch();
 		await vault.launch();
@@ -489,7 +490,7 @@ describe("external settings changes (data.json changed on disk, e.g. by Sync)", 
 
 	test("stop forwarding once BPM is unloaded", async () => {
 		const vault = new Vault(["a"]);
-		vault.settings.DELAY = true;
+		vault.settings.STAGED_STARTUP = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 		await vault.launch();
 		await vault.launch();
@@ -498,5 +499,34 @@ describe("external settings changes (data.json changed on disk, e.g. by Sync)", 
 		vault.plugins.enabledPlugins.delete("a"); // isolate BPM's forwarding from Obsidian's
 		vault.plugins.emitRaw(".obsidian/plugins/a/data.json");
 		expect(vault.plugins.plugins.a.configFileChanges).toBe(0);
+	});
+});
+
+describe("setStartupTier", () => {
+	test("moves plugins on or off the native list (next launch), skipping ignored ones and BPM", async () => {
+		const vault = new Vault(["a", "b", "ignored"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a", "b", "ignored"];
+		await vault.launch();
+		await vault.startup.setIgnored("ignored", true);
+		expect(vault.native()).toEqual([BPM, "ignored"].sort());
+		const logBefore = vault.plugins.log.filter((entry) => entry !== "save").length;
+
+		expect(await vault.startup.setStartupTier(["a", "ignored", BPM], "native")).toEqual(["a"]);
+		expect(vault.native()).toEqual([BPM, "a", "ignored"].sort());
+		expect(vault.record("a").startupTier).toBe("native");
+		expect(await vault.startup.setStartupTier(["a", "b"], "background")).toEqual(["a", "b"]);
+		expect(vault.native()).toEqual([BPM, "ignored"].sort());
+		expect(vault.plugins.log.filter((entry) => entry !== "save").length).toBe(logBefore); // nothing reloaded
+	});
+
+	test("outside staged startup it only records the tier", async () => {
+		const vault = new Vault(["a"]);
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await vault.launch();
+		await vault.startup.setStartupTier(["a"], "background");
+		expect(vault.native()).toEqual([BPM, "a"].sort());
+		await vault.startup.setStagedStartup(true);
+		expect(vault.native()).toEqual([BPM]);
 	});
 });

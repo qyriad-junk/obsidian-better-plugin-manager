@@ -2,6 +2,7 @@ import Manager from "main";
 import { BPM_TAG_ID, ensureBpmTagExists } from "src/repo-resolver";
 import { normalizePath, parseYaml, stringifyYaml } from "obsidian";
 import { compareVersions } from "./version";
+import { hasLegacyDelaySettings, migrateLegacyDelaySettings } from "./startup-tiers";
 
 /**
  * 单个迁移任务。
@@ -222,4 +223,42 @@ export const runMigrations = async (manager: Manager): Promise<void> => {
 	if (anyChange) {
 		await manager.saveSettings();
 	}
+};
+
+/** Where the pre-tiers data.json is kept, next to it in BPM's plugin folder. */
+export const DELAY_SETTINGS_BACKUP_FILE = "data.before-startup-tiers.json";
+
+/**
+ * Convert per-plugin delay presets to startup tiers (see src/startup-tiers.ts), first saving a copy of data.json as it
+ * was. Runs on every load, right after loadSettings(), and does nothing once converted: it goes by the shape of the
+ * settings rather than MIGRATION_VERSION, so it also catches old-format settings that arrive later (say, synced
+ * from a device still running an older BPM).
+ *
+ * The backup is written once and never overwritten, so it keeps the earliest pre-tiers settings. If it can't be
+ * written, nothing is converted (the old fields stay in the settings and in data.json; staged startup stays off
+ * until the next successful load).
+ *
+ * Returns the backup's path if settings were converted (for telling the user), otherwise null.
+ */
+export const migrateDelaysToStartupTiers = async (manager: Manager): Promise<string | null> => {
+	const settings = manager.settings as unknown as Record<string, unknown>;
+	if (!hasLegacyDelaySettings(settings)) return null;
+
+	const adapter = manager.app.vault.adapter;
+	const folder = manager.manifest.dir ?? normalizePath(`${manager.app.vault.configDir}/plugins/${manager.manifest.id}`);
+	const dataPath = normalizePath(`${folder}/data.json`);
+	const backupPath = normalizePath(`${folder}/${DELAY_SETTINGS_BACKUP_FILE}`);
+	try {
+		if (!await adapter.exists(backupPath)) {
+			const original = await adapter.exists(dataPath) ? await adapter.read(dataPath) : JSON.stringify(settings, null, 2);
+			await adapter.write(backupPath, original);
+		}
+	} catch (error) {
+		console.error("[BPM] Couldn't back up data.json; not converting delay settings to startup tiers this time.", error);
+		return null;
+	}
+
+	migrateLegacyDelaySettings(settings);
+	await manager.saveData(manager.settings);
+	return backupPath;
 };

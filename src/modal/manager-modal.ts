@@ -70,6 +70,8 @@ import {
     unlinkSharedVaultFolder,
 } from "../vault-share";
 import { AppPluginInstanceLike, getExtraButtonElement, ObsidianAppWithInternals, ObsidianPluginRegistry, VaultAdapterWithBasePath } from "src/obsidian-internals";
+import { isStartupTier, STARTUP_TIER_ICONS, STARTUP_TIER_LABEL_KEYS, STARTUP_TIERS } from "src/startup-tiers";
+import type { StartupTier } from "src/startup-tiers";
 
 type ManagerPage = "plugins" | "themes" | "install" | "sources" | "transfer" | "vaults" | "ribbon" | "troubleshoot";
 type AppearanceView = "profiles" | "themes" | "snippets";
@@ -334,9 +336,8 @@ export class ManagerModal extends Modal {
     tags: string[] = [];
     tagOperator: FilterOperator = "contains";
     // 标签内容
-    delay = "";
-    delays: string[] = [];
-    delayOperator: FilterOperator = "contains";
+    startupTiers: string[] = [];
+    startupTierOperator: FilterOperator = "contains";
     // 搜索内容
     searchText = "";
 
@@ -354,7 +355,7 @@ export class ManagerModal extends Modal {
     statusOperatorControl?: FilterOperatorControl;
     groupMultiSelect?: MultiSelectFilterControl;
     tagMultiSelect?: MultiSelectFilterControl;
-    delayMultiSelect?: MultiSelectFilterControl;
+    startupTierMultiSelect?: MultiSelectFilterControl;
     private bulkEditMode = false;
     private bulkSelectedPluginIds = new Set<string>();
     actionCollapsed = false;
@@ -553,14 +554,17 @@ export class ManagerModal extends Modal {
         ];
     }
 
-    private getDelayFilterOptions(allLabel: string, showTime = false): Array<[string, string]> {
-        const delayCounts = this.settings.Plugins.reduce((acc: { [key: string]: number }, plugin) => { const delay = plugin.delay || ""; acc[delay] = (acc[delay] || 0) + 1; return acc; }, { "": 0 });
+    /** The small label after a plugin's name saying when BPM starts it (only for plugins BPM starts itself). */
+    private createStartupTierBadge(tier: StartupTier): HTMLElement {
+        const label = this.manager.translator.t(STARTUP_TIER_LABEL_KEYS[tier]);
+        return createSpan({ text: label, title: `${this.manager.translator.t("通用_启动阶段_文本")}: ${label}`, cls: ["manager-item__name-delay"] });
+    }
+
+    private getStartupTierFilterOptions(allLabel: string): Array<[string, string]> {
+        const tierCounts = this.settings.Plugins.reduce((acc: { [key: string]: number }, plugin) => { acc[plugin.startupTier] = (acc[plugin.startupTier] || 0) + 1; return acc; }, {});
         return [
             ["", allLabel],
-            ...this.settings.DELAYS.map((item): [string, string] => [
-                item.id,
-                showTime ? `${item.name} (${item.time}s) [${delayCounts[item.id] || 0}]` : `${item.name} (${delayCounts[item.id] || 0})`,
-            ]),
+            ...STARTUP_TIERS.map((tier): [string, string] => [tier, `${this.manager.translator.t(STARTUP_TIER_LABEL_KEYS[tier])} [${tierCounts[tier] || 0}]`]),
         ];
     }
 
@@ -648,22 +652,12 @@ export class ManagerModal extends Modal {
         return this.normalizeFilterOperator(this.settings.PERSISTENCE ? this.settings.FILTER_TAG_OPERATOR : this.tagOperator);
     }
 
-    private getDelayFilterValues(): string[] {
-        const availableValues = this.settings.DELAYS.map((delay) => delay.id);
-        const values = this.settings.PERSISTENCE
-            ? this.filterValuesByAvailable(this.settings.FILTER_DELAY_VALUES, availableValues, "")
-            : this.filterValuesByAvailable(this.delays, availableValues, "");
-        if (values.length > 0) return values;
-        const fallback = this.settings.PERSISTENCE ? this.settings.FILTER_DELAY : this.delay;
-        return this.filterValuesByAvailable([fallback], availableValues, "");
+    private getStartupTierFilterValues(): string[] {
+        return this.filterValuesByAvailable(this.settings.PERSISTENCE ? this.settings.FILTER_STARTUP_TIER_VALUES : this.startupTiers, [...STARTUP_TIERS], "");
     }
 
-    private getDelayFilterValue(): string {
-        return this.getDelayFilterValues()[0] || "";
-    }
-
-    private getDelayFilterOperator(): FilterOperator {
-        return this.normalizeFilterOperator(this.settings.PERSISTENCE ? this.settings.FILTER_DELAY_OPERATOR : this.delayOperator);
+    private getStartupTierFilterOperator(): FilterOperator {
+        return this.normalizeFilterOperator(this.settings.PERSISTENCE ? this.settings.FILTER_STARTUP_TIER_OPERATOR : this.startupTierOperator);
     }
 
     private hasActiveStatusFilter(): boolean {
@@ -674,7 +668,7 @@ export class ManagerModal extends Modal {
         const statusValues = this.getStatusFilterValues();
         const groupValues = this.getGroupFilterValues();
         const tagValues = this.getTagFilterValues();
-        const delayValues = this.getDelayFilterValues();
+        const startupTierValues = this.getStartupTierFilterValues();
         this.settings.FILTER_SEARCH = this.searchText || "";
         this.settings.FILTER_STATUS_VALUES = statusValues;
         this.settings.FILTER_STATUS = statusValues[0] || "all";
@@ -685,28 +679,26 @@ export class ManagerModal extends Modal {
         this.settings.FILTER_TAG_VALUES = tagValues;
         this.settings.FILTER_TAG = tagValues[0] || "";
         this.settings.FILTER_TAG_OPERATOR = this.getTagFilterOperator();
-        this.settings.FILTER_DELAY_VALUES = delayValues;
-        this.settings.FILTER_DELAY = delayValues[0] || "";
-        this.settings.FILTER_DELAY_OPERATOR = this.getDelayFilterOperator();
+        this.settings.FILTER_STARTUP_TIER_VALUES = startupTierValues;
+        this.settings.FILTER_STARTUP_TIER_OPERATOR = this.getStartupTierFilterOperator();
     }
 
     public usePersistedFiltersAsSessionFilters() {
         const statusValues = this.normalizeFilterValues(this.settings.FILTER_STATUS_VALUES, "all");
         const groupValues = this.normalizeFilterValues(this.settings.FILTER_GROUP_VALUES, "");
         const tagValues = this.normalizeFilterValues(this.settings.FILTER_TAG_VALUES, "");
-        const delayValues = this.normalizeFilterValues(this.settings.FILTER_DELAY_VALUES, "");
+        const startupTierValues = this.normalizeFilterValues(this.settings.FILTER_STARTUP_TIER_VALUES, "");
         this.statusFilters = statusValues.length > 0 ? statusValues : this.valuesFromSingleFilter(this.settings.FILTER_STATUS, "all");
         this.filter = this.statusFilters[0] || "all";
         this.groups = groupValues.length > 0 ? groupValues : this.valuesFromSingleFilter(this.settings.FILTER_GROUP, "");
         this.group = this.groups[0] || "";
         this.tags = tagValues.length > 0 ? tagValues : this.valuesFromSingleFilter(this.settings.FILTER_TAG, "");
         this.tag = this.tags[0] || "";
-        this.delays = delayValues.length > 0 ? delayValues : this.valuesFromSingleFilter(this.settings.FILTER_DELAY, "");
-        this.delay = this.delays[0] || "";
+        this.startupTiers = startupTierValues;
         this.statusOperator = this.normalizeFilterOperator(this.settings.FILTER_STATUS_OPERATOR);
         this.groupOperator = this.normalizeFilterOperator(this.settings.FILTER_GROUP_OPERATOR);
         this.tagOperator = this.normalizeFilterOperator(this.settings.FILTER_TAG_OPERATOR);
-        this.delayOperator = this.normalizeFilterOperator(this.settings.FILTER_DELAY_OPERATOR);
+        this.startupTierOperator = this.normalizeFilterOperator(this.settings.FILTER_STARTUP_TIER_OPERATOR);
         this.searchText = this.settings.FILTER_SEARCH || this.searchText || "";
     }
 
@@ -715,15 +707,14 @@ export class ManagerModal extends Modal {
         const statusValues = this.getStatusFilterValues();
         const groupValues = this.getGroupFilterValues();
         const tagValues = this.getTagFilterValues();
-        const delayValues = this.getDelayFilterValues();
+        const startupTierValues = this.getStartupTierFilterValues();
         const changed = JSON.stringify(this.settings.FILTER_STATUS_VALUES || []) !== JSON.stringify(statusValues)
             || JSON.stringify(this.settings.FILTER_GROUP_VALUES || []) !== JSON.stringify(groupValues)
             || JSON.stringify(this.settings.FILTER_TAG_VALUES || []) !== JSON.stringify(tagValues)
-            || JSON.stringify(this.settings.FILTER_DELAY_VALUES || []) !== JSON.stringify(delayValues)
+            || JSON.stringify(this.settings.FILTER_STARTUP_TIER_VALUES || []) !== JSON.stringify(startupTierValues)
             || this.settings.FILTER_STATUS !== (statusValues[0] || "all")
             || this.settings.FILTER_GROUP !== (groupValues[0] || "")
-            || this.settings.FILTER_TAG !== (tagValues[0] || "")
-            || this.settings.FILTER_DELAY !== (delayValues[0] || "");
+            || this.settings.FILTER_TAG !== (tagValues[0] || "");
         if (!changed) return;
         this.settings.FILTER_STATUS_VALUES = statusValues;
         this.settings.FILTER_STATUS = statusValues[0] || "all";
@@ -731,8 +722,7 @@ export class ManagerModal extends Modal {
         this.settings.FILTER_GROUP = groupValues[0] || "";
         this.settings.FILTER_TAG_VALUES = tagValues;
         this.settings.FILTER_TAG = tagValues[0] || "";
-        this.settings.FILTER_DELAY_VALUES = delayValues;
-        this.settings.FILTER_DELAY = delayValues[0] || "";
+        this.settings.FILTER_STARTUP_TIER_VALUES = startupTierValues;
         void this.manager.saveSettings();
     }
 
@@ -825,29 +815,23 @@ export class ManagerModal extends Modal {
         }
     }
 
-    private setDelayFilterValues(values: string[]) {
+    private setStartupTierFilterValues(values: string[]) {
         const next = this.normalizeFilterValues(values, "");
         if (this.settings.PERSISTENCE) {
-            this.settings.FILTER_DELAY_VALUES = next;
-            this.settings.FILTER_DELAY = next[0] || "";
+            this.settings.FILTER_STARTUP_TIER_VALUES = next;
             void this.manager.saveSettings();
         } else {
-            this.delays = next;
-            this.delay = next[0] || "";
+            this.startupTiers = next;
         }
     }
 
-    private setDelayFilterValue(value: string) {
-        this.setDelayFilterValues(value ? [value] : []);
-    }
-
-    private setDelayFilterOperator(value: string) {
+    private setStartupTierFilterOperator(value: string) {
         const next = this.normalizeFilterOperator(value);
         if (this.settings.PERSISTENCE) {
-            this.settings.FILTER_DELAY_OPERATOR = next;
+            this.settings.FILTER_STARTUP_TIER_OPERATOR = next;
             void this.manager.saveSettings();
         } else {
-            this.delayOperator = next;
+            this.startupTierOperator = next;
         }
     }
 
@@ -1313,7 +1297,7 @@ export class ManagerModal extends Modal {
         if (!this.matchesStatusFilter(managerPlugin, manifest, isEnabled, this.getStatusFilterValues(), this.getStatusFilterOperator(), hiddenPluginIds)) return false;
         if (!this.matchesSingleValueFilter(managerPlugin.group, this.getGroupFilterValues(), this.getGroupFilterOperator())) return false;
         if (!this.matchesTagFilter(managerPlugin.tags, this.getTagFilterValues(), this.getTagFilterOperator())) return false;
-        if (!this.matchesSingleValueFilter(managerPlugin.delay, this.getDelayFilterValues(), this.getDelayFilterOperator())) return false;
+        if (!this.matchesSingleValueFilter(managerPlugin.startupTier, this.getStartupTierFilterValues(), this.getStartupTierFilterOperator())) return false;
         if (lowerSearchText !== "" && !this.getPluginSearchText(managerPlugin, manifest).includes(lowerSearchText)) return false;
         const isSelf = manifest.id === this.manager.manifest.id;
         if (!this.editorMode && !isSelf && hiddenPluginIds.has(manifest.id) && !this.getStatusFilterValues().includes("hidden")) return false;
@@ -1445,16 +1429,13 @@ export class ManagerModal extends Modal {
         }
 
         header?.querySelectorAll(".manager-item__name-delay").forEach((el) => el.remove());
-        if (this.settings.DELAY && !this.editorMode && !isSelf && managerPlugin.delay !== "") {
-            const delay = this.settings.DELAYS.find((item) => item.id === managerPlugin.delay);
-            if (delay) {
-                const delayEl = createSpan({ text: `${delay.time}s`, cls: ["manager-item__name-delay"] });
-                const anchor = card.querySelector<HTMLElement>(".manager-plugin-card__note")
-                    ?? card.querySelector<HTMLElement>(".manager-item__versions")
-                    ?? cardIcon;
-                if (anchor) anchor.insertAdjacentElement("afterend", delayEl);
-                else header?.appendChild(delayEl);
-            }
+        if (this.settings.STAGED_STARTUP && !this.editorMode && !isSelf && this.manager.pluginStartup.isStartedByBpm(managerPlugin.id)) {
+            const delayEl = this.createStartupTierBadge(managerPlugin.startupTier);
+            const anchor = card.querySelector<HTMLElement>(".manager-plugin-card__note")
+                ?? card.querySelector<HTMLElement>(".manager-item__versions")
+                ?? cardIcon;
+            if (anchor) anchor.insertAdjacentElement("afterend", delayEl);
+            else header?.appendChild(delayEl);
         }
 
         const tagsEl = card.querySelector<HTMLElement>(".manager-plugin-card__tags");
@@ -1829,19 +1810,13 @@ export class ManagerModal extends Modal {
         menu.showAtMouseEvent(event);
     }
 
-    private showBulkDelayMenu(event: MouseEvent) {
-        const t = (k: string, vars?: Record<string, string | number | boolean | null | undefined>) => this.manager.translator.t(k, vars);
+    private showBulkStartupTierMenu(event: MouseEvent) {
         const menu = new Menu();
-        menu.addItem((item) => item
-            .setTitle(t("通用_无延迟_文本"))
-            .setIcon("timer-off")
-            .onClick(() => { void this.applyBulkDelay(""); }));
-        if (this.settings.DELAYS.length > 0) menu.addSeparator();
-        for (const delay of this.settings.DELAYS) {
+        for (const tier of STARTUP_TIERS) {
             menu.addItem((item) => item
-                .setTitle(`${delay.name || delay.id} (${delay.time}s)`)
-                .setIcon("timer")
-                .onClick(() => { void this.applyBulkDelay(delay.id); }));
+                .setTitle(this.manager.translator.t(STARTUP_TIER_LABEL_KEYS[tier]))
+                .setIcon(STARTUP_TIER_ICONS[tier])
+                .onClick(() => { void this.applyBulkStartupTier(tier); }));
         }
         menu.showAtMouseEvent(event);
     }
@@ -1883,7 +1858,7 @@ export class ManagerModal extends Modal {
         this.createBulkActionButton(actions, "folder-tree", t("批量编辑_设置分组"), (event) => this.showBulkGroupMenu(event), disabled);
         this.createBulkActionButton(actions, "tag", t("批量编辑_添加标签"), (event) => this.showBulkTagMenu(event, "add"), disabled);
         this.createBulkActionButton(actions, "tag-x", t("批量编辑_移除标签"), (event) => this.showBulkTagMenu(event, "remove"), disabled);
-        if (this.settings.DELAY) this.createBulkActionButton(actions, "timer", t("批量编辑_设置延迟"), (event) => this.showBulkDelayMenu(event), disabled);
+        if (this.settings.STAGED_STARTUP) this.createBulkActionButton(actions, "timer", t("批量编辑_设置启动阶段"), (event) => this.showBulkStartupTierMenu(event), disabled);
         this.createBulkActionButton(actions, "more-horizontal", t("管理器_更多操作_描述"), (event) => this.showBulkMoreMenu(event));
         this.createBulkActionButton(actions, "x", t("通用_完成_文本"), () => this.setBulkEditMode(false));
     }
@@ -1978,16 +1953,15 @@ export class ManagerModal extends Modal {
         await this.finishBulkMetadataEdit("批量编辑_已移除标签", plugins.length);
     }
 
-    private async applyBulkDelay(delayId: string) {
-        const plugins = this.getSelectedManagerPlugins().filter((plugin) => !plugin.tags.includes(BPM_IGNORE_TAG));
+    private async applyBulkStartupTier(tier: StartupTier) {
+        const plugins = this.getSelectedManagerPlugins().filter((plugin) => this.manager.pluginStartup.isManaged(plugin.id));
         if (plugins.length === 0) {
             new Notice(this.manager.translator.t("批量编辑_无可操作插件"));
             return;
         }
-        plugins.forEach((plugin) => {
-            plugin.delay = delayId;
-        });
-        await this.finishBulkMetadataEdit("批量编辑_已更新延迟", plugins.length);
+        // Counts plugins already in that tier too: they were asked for, and are now as asked.
+        await this.manager.pluginStartup.setStartupTier(plugins.map((plugin) => plugin.id), tier);
+        await this.finishBulkMetadataEdit("批量编辑_已更新启动阶段", plugins.length);
     }
 
     private async finishBulkMetadataEdit(messageKey: string, count: number) {
@@ -2568,13 +2542,13 @@ export class ManagerModal extends Modal {
             void this.reloadShowData();
         });
 
-        // [过滤行] 延迟选择列表
-        if (this.settings.DELAY) {
-            const delays = this.getDelayFilterOptions(this.manager.translator.t("筛选_全部_描述"), true);
-            const delayControl = createFilterSelectField(t("通用_延迟_文本"), "timer", "compound");
-            createOperatorToggle(delayControl, this.getDelayFilterOperator(), t("筛选_延迟取反_标签"), (value) => this.setDelayFilterOperator(value));
-            this.delayMultiSelect = this.createMultiSelectFilter(delayControl, delays, this.getDelayFilterValues(), "", delays[0]?.[1] || t("筛选_全部_描述"), t("筛选_延迟_标签"), (values) => {
-                this.setDelayFilterValues(values);
+        // [过滤行] 启动阶段选择列表
+        if (this.settings.STAGED_STARTUP) {
+            const delays = this.getStartupTierFilterOptions(this.manager.translator.t("筛选_全部_描述"));
+            const delayControl = createFilterSelectField(t("通用_启动阶段_文本"), "timer", "compound");
+            createOperatorToggle(delayControl, this.getStartupTierFilterOperator(), t("筛选_启动阶段取反_标签"), (value) => this.setStartupTierFilterOperator(value));
+            this.startupTierMultiSelect = this.createMultiSelectFilter(delayControl, delays, this.getStartupTierFilterValues(), "", delays[0]?.[1] || t("筛选_全部_描述"), t("筛选_启动阶段_标签"), (values) => {
+                this.setStartupTierFilterValues(values);
                 void this.reloadShowData();
             });
         }
@@ -2787,7 +2761,7 @@ export class ManagerModal extends Modal {
             const currentStatuses = this.getStatusFilterValues();
             const currentGroups = this.getGroupFilterValues();
             const currentTags = this.getTagFilterValues();
-            const currentDelays = this.getDelayFilterValues();
+            const currentStartupTiers = this.getStartupTierFilterValues();
 
             const addChip = (label: string, operator: FilterOperator, onRemove: () => void) => {
                 const chip = activeFiltersContainer.createDiv("bpm-active-filter-chip");
@@ -2829,14 +2803,12 @@ export class ManagerModal extends Modal {
                 }
             }
 
-            // 延迟筛选标签
-            for (const delay of currentDelays) {
-                const delayItem = this.settings.DELAYS.find(d => d.id === delay);
-                if (delayItem) {
-                    addChip(delayItem.name, this.getDelayFilterOperator(), () => {
-                        this.setDelayFilterValues(this.getDelayFilterValues().filter((value) => value !== delay));
-                    });
-                }
+            // 启动阶段筛选标签
+            for (const tier of currentStartupTiers) {
+                if (!isStartupTier(tier)) continue;
+                addChip(this.manager.translator.t(STARTUP_TIER_LABEL_KEYS[tier]), this.getStartupTierFilterOperator(), () => {
+                    this.setStartupTierFilterValues(this.getStartupTierFilterValues().filter((value) => value !== tier));
+                });
             }
 
             // 如果没有激活的筛选，隐藏容器
@@ -2917,13 +2889,13 @@ export class ManagerModal extends Modal {
             void this.reloadShowData();
         });
 
-        // 延迟
-        if (this.settings.DELAY) {
-            const delays = this.getDelayFilterOptions(t("筛选_全部_描述"));
-            const delaySetting = new Setting(filterPanel).setName(t("通用_延迟_文本"));
-            addMobileOperatorToggle(delaySetting, this.getDelayFilterOperator(), t("筛选_延迟取反_标签"), (value) => this.setDelayFilterOperator(value));
-            this.createMultiSelectFilter(delaySetting.controlEl, delays, this.getDelayFilterValues(), "", delays[0]?.[1] || t("筛选_全部_描述"), t("筛选_延迟_标签"), (values) => {
-                this.setDelayFilterValues(values);
+        // 启动阶段
+        if (this.settings.STAGED_STARTUP) {
+            const delays = this.getStartupTierFilterOptions(t("筛选_全部_描述"));
+            const delaySetting = new Setting(filterPanel).setName(t("通用_启动阶段_文本"));
+            addMobileOperatorToggle(delaySetting, this.getStartupTierFilterOperator(), t("筛选_启动阶段取反_标签"), (value) => this.setStartupTierFilterOperator(value));
+            this.createMultiSelectFilter(delaySetting.controlEl, delays, this.getStartupTierFilterValues(), "", delays[0]?.[1] || t("筛选_全部_描述"), t("筛选_启动阶段_标签"), (values) => {
+                this.setStartupTierFilterValues(values);
                 this.showHeadMobile();
                 void this.reloadShowData();
             });
@@ -3029,7 +3001,6 @@ export class ManagerModal extends Modal {
         const layoutItems = this.getSortedPluginLayoutItems(this.getPluginLayout(uniquePlugins), manifestById, pluginSettingsById, dateMetaById);
         const groupSettingsById = new Map(this.settings.GROUPS.map((group) => [group.id, group]));
         const tagSettingsById = new Map(this.settings.TAGS.map((tag) => [tag.id, tag]));
-        const delaySettingsById = new Map(this.settings.DELAYS.map((delay) => [delay.id, delay]));
         const hiddenPluginIds = new Set(this.settings.HIDES || []);
         const lowerSearchText = this.searchText.trim().toLowerCase();
         const statusFilter = this.getStatusFilterValues();
@@ -3038,8 +3009,8 @@ export class ManagerModal extends Modal {
         const groupOperator = this.getGroupFilterOperator();
         const tagFilter = this.getTagFilterValues();
         const tagOperator = this.getTagFilterOperator();
-        const delayFilter = this.getDelayFilterValues();
-        const delayOperator = this.getDelayFilterOperator();
+        const startupTierFilter = this.getStartupTierFilterValues();
+        const startupTierOperator = this.getStartupTierFilterOperator();
         const getBasePath = (this.app.vault.adapter as VaultAdapterWithBasePath).getBasePath?.();
         const basePath = getBasePath ? normalizePath(getBasePath) : "";
         const cfgDir = this.app.vault.configDir;
@@ -3087,7 +3058,7 @@ export class ManagerModal extends Modal {
             if (!this.matchesStatusFilter(ManagerPlugin, plugin, isEnabled, statusFilter, statusOperator, hiddenPluginIds)) continue;
             if (!this.matchesSingleValueFilter(ManagerPlugin.group, groupFilter, groupOperator)) continue;
             if (!this.matchesTagFilter(ManagerPlugin.tags, tagFilter, tagOperator)) continue;
-            if (!this.matchesSingleValueFilter(ManagerPlugin.delay, delayFilter, delayOperator)) continue;
+            if (!this.matchesSingleValueFilter(ManagerPlugin.startupTier, startupTierFilter, startupTierOperator)) continue;
             if (lowerSearchText !== "" && !this.getPluginSearchText(ManagerPlugin, plugin).includes(lowerSearchText)) continue;
             if (!this.editorMode && !isSelf && hiddenPluginIds.has(plugin.id) && !statusFilter.includes("hidden")) continue;
             const rawDir = plugin.dir || `plugins/${plugin.id}`;
@@ -3496,13 +3467,9 @@ export class ManagerModal extends Modal {
                 setIcon(note, "notebook-pen");
             }
 
-            // [默认] 延迟
-            if (this.settings.DELAY && !this.editorMode && !isSelf && ManagerPlugin.delay !== "") {
-                const d = delaySettingsById.get(ManagerPlugin.delay);
-                if (d) {
-                    const delay = createSpan({ text: `${d.time}s`, cls: ["manager-item__name-delay"], });
-                    itemEl.nameEl.appendChild(delay);
-                }
+            // [默认] 启动阶段
+            if (this.settings.STAGED_STARTUP && !this.editorMode && !isSelf && this.manager.pluginStartup.isStartedByBpm(plugin.id)) {
+                itemEl.nameEl.appendChild(this.createStartupTierBadge(ManagerPlugin.startupTier));
             }
             // [默认] 描述
             const hasDescription = ManagerPlugin.desc.trim().length > 0;
@@ -4041,21 +4008,17 @@ export class ManagerModal extends Modal {
                     ManagerPlugin.name = plugin.name;
                     ManagerPlugin.desc = plugin.description;
                     ManagerPlugin.group = "";
-                    ManagerPlugin.delay = "";
                     ManagerPlugin.tags = [];
                     this.manager.applySpecialPluginTags(ManagerPlugin);
                     await this.manager.savePluginAndExport(plugin.id);
                     this.refreshPluginCard(plugin.id, { allowReload: true });
                 });
-                // [编辑] 延迟
-                if (this.settings.DELAY) {
-                    const delays: Array<[string, string]> = [
-                        ["", this.manager.translator.t("通用_无延迟_文本")],
-                        ...this.settings.DELAYS.map((item): [string, string] => [item.id, item.name]),
-                    ];
+                // [编辑] 启动阶段
+                if (this.settings.STAGED_STARTUP) {
+                    const delays: Array<[string, string]> = STARTUP_TIERS.map((tier): [string, string] => [tier, this.manager.translator.t(STARTUP_TIER_LABEL_KEYS[tier])]);
                     const delaysEl = new DropdownComponent(itemEl.controlEl);
                     this.addOrderedOptions(delaysEl, delays);
-                    delaysEl.setValue(ManagerPlugin?.delay || "");
+                    delaysEl.setValue(ManagerPlugin.startupTier);
 
                     const pSettings = this.settings.Plugins.find(p => p.id === plugin.id);
                     const isIgnored = pSettings?.tags?.includes(BPM_IGNORE_TAG);
@@ -4068,12 +4031,11 @@ export class ManagerModal extends Modal {
                         if (isIgnored) {
                             new Notice(this.manager.translator.t("提示_BPM忽略_操作拦截"));
                             isRestoring = true;
-                            delaysEl.setValue(ManagerPlugin.delay || "");
+                            delaysEl.setValue(ManagerPlugin.startupTier);
                             isRestoring = false;
                             return;
                         }
-                        ManagerPlugin.delay = val;
-                        await this.manager.savePluginAndExport(plugin.id);
+                        if (isStartupTier(val)) await this.manager.pluginStartup.setStartupTier([plugin.id], val);
                         this.refreshPluginCard(plugin.id, { allowReload: true });
                     });
 
@@ -4465,7 +4427,7 @@ export class ManagerModal extends Modal {
             && !this.hasActiveStatusFilter()
             && this.getGroupFilterValues().length === 0
             && this.getTagFilterValues().length === 0
-            && this.getDelayFilterValues().length === 0
+            && this.getStartupTierFilterValues().length === 0
             && !this.searchText;
     }
 
@@ -7597,7 +7559,7 @@ export class ManagerModal extends Modal {
             return;
         }
 
-        if (this.settings.DELAY) {
+        if (this.settings.STAGED_STARTUP) {
             this.renderVaultWarning(card, t("共享库_延迟模式_提示"));
         }
 
@@ -7855,9 +7817,9 @@ export class ManagerModal extends Modal {
             const tags = this.getTagFilterOptions(this.manager.translator.t("筛选_全部_描述"));
             this.tagMultiSelect.refreshOptions(tags, this.getTagFilterValues());
         }
-        if (this.settings.DELAY && this.delayMultiSelect) {
-            const delays = this.getDelayFilterOptions(this.manager.translator.t("筛选_全部_描述"));
-            this.delayMultiSelect.refreshOptions(delays, this.getDelayFilterValues());
+        if (this.settings.STAGED_STARTUP && this.startupTierMultiSelect) {
+            const delays = this.getStartupTierFilterOptions(this.manager.translator.t("筛选_全部_描述"));
+            this.startupTierMultiSelect.refreshOptions(delays, this.getStartupTierFilterValues());
         }
         await this.reloadShowData();
         if (preserveScroll) this.pageEl.scrollTo({ top: scrollTop });

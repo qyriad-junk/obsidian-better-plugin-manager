@@ -9,7 +9,8 @@ import Agreement from 'src/agreement';
 import { RepoResolver, ensureBpmTagExists, BPM_TAG_ID } from './repo-resolver';
 import { Notice, Platform, requestUrl } from 'obsidian';
 import { BetaSource, ManagerPlugin, BPM_IGNORE_TAG, EONDR_PLUGIN_TAG_ID } from './data/types';
-import { runMigrations } from './migrations';
+import { migrateDelaysToStartupTiers, runMigrations } from './migrations';
+import { DEFAULT_STARTUP_TIER } from './startup-tiers';
 import { fetchReleaseVersions, installPluginFromGithub, installThemeFromGithub, ReleaseVersion, sanitizeRepo } from './github-install';
 import { PluginStartup, PluginStartupHost } from './plugin-startup';
 import { RibbonLayoutKeeper } from './ribbon-state';
@@ -99,6 +100,7 @@ export default class Manager extends Plugin {
 
         console.log(`%c ${this.manifest.name} %c v${this.manifest.version} `, `padding: 2px; border-radius: 2px 0 0 2px; color: #fff; background: #5B5B5B;`, `padding: 2px; border-radius: 0 2px 2px 0; color: #fff; background: #409EFF;`);
         await this.loadSettings();
+        const delaySettingsBackup = await migrateDelaysToStartupTiers(this);
         let settingsDirty = false;
         const markSettingsDirty = () => {
             settingsDirty = true;
@@ -113,6 +115,7 @@ export default class Manager extends Plugin {
         }
         // 初始化语言系统
         this.translator = new Translator(this);
+        if (delaySettingsBackup) new Notice(this.translator.t("启动阶段_迁移_通知", { path: delaySettingsBackup }), 0);
         let builtinTagsChanged = false;
         const tagCountBeforeBpmEnsure = this.settings.TAGS.length;
         ensureBpmTagExists(this);
@@ -160,7 +163,7 @@ export default class Manager extends Plugin {
             () => (this.app.workspace as WorkspaceWithRibbon).leftRibbon,
             await this.readSavedRibbonLayout(),
         );
-        // Adopts native toggles, re-derives Obsidian's startup list, and (in delay mode) schedules delayed starts.
+        // Adopts native toggles, re-derives Obsidian's startup list, and (staged startup) starts the rest once ready.
         this.pluginStartup = new PluginStartup(this.createPluginStartupHost());
         await this.pluginStartup.start();
         Commands(this.app, this);
@@ -505,7 +508,7 @@ export default class Manager extends Plugin {
             group: '',
             tags: [],
             enabled: wanted,
-            delay: '',
+            startupTier: DEFAULT_STARTUP_TIER,
             note: '',
         };
         if ((this.settings.BPM_INSTALLED || []).includes(id)) record.tags.push(BPM_TAG_ID);
@@ -885,7 +888,7 @@ export default class Manager extends Plugin {
                 group: "",
                 tags: [],
                 enabled: true,
-                delay: "",
+                startupTier: DEFAULT_STARTUP_TIER,
                 note: "",
             });
             if (shouldSave) void this.saveSettings();
@@ -903,8 +906,8 @@ export default class Manager extends Plugin {
             existing.enabled = true;
             changed = true;
         }
-        if (existing.delay !== "") {
-            existing.delay = "";
+        if (existing.startupTier !== DEFAULT_STARTUP_TIER) {
+            existing.startupTier = DEFAULT_STARTUP_TIER;
             changed = true;
         }
         if (changed && shouldSave) void this.saveSettings();

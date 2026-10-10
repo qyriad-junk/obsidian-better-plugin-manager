@@ -14,6 +14,7 @@ import { ManagerSettings, TagFilterOperator } from "../settings/data";
 import Manager from "main";
 import { ManagerModal } from "./manager-modal";
 import { ObsidianAppWithInternals } from "src/obsidian-internals";
+import { STARTUP_TIER_LABEL_KEYS, STARTUP_TIERS } from "src/startup-tiers";
 
 export class HideModal extends Modal {
     manager: Manager;
@@ -30,12 +31,12 @@ export class HideModal extends Modal {
     searchText = "";
     // 搜索结果
     searchEl!: SearchComponent;
-    delay = "";
+    startupTier = "";
     tag = "";
     tagOperator: TagFilterOperator = "contains";
     group = "";
     groupOperator: TagFilterOperator = "contains";
-    delayOperator: TagFilterOperator = "contains";
+    startupTierOperator: TagFilterOperator = "contains";
     filter = "all";
 
     private addOrderedOptions(dropdown: DropdownComponent, options: Array<[string, string]>) {
@@ -151,27 +152,27 @@ export class HideModal extends Modal {
         tagsDropdown.setValue(this.tag);
         tagsDropdown.onChange((value) => { this.tag = value; void this.reloadShowData(); });
 
-        // [搜索行] 延迟选择列表
-        if (this.settings.DELAY) {
-            const delayCounts = this.settings.Plugins.reduce((acc: { [key: string]: number }, plugin) => { const delay = plugin.delay || ""; acc[delay] = (acc[delay] || 0) + 1; return acc; }, { "": 0 });
-            const delays: Array<[string, string]> = [
-                ["", this.manager.translator.t("通用_无延迟_文本")],
-                ...this.settings.DELAYS.map((item): [string, string] => [item.id, `${item.name} (${delayCounts[item.id] || 0})`]),
+        // [搜索行] 启动阶段选择列表
+        if (this.settings.STAGED_STARTUP) {
+            const tierCounts = this.settings.Plugins.reduce((acc: { [key: string]: number }, plugin) => { acc[plugin.startupTier] = (acc[plugin.startupTier] || 0) + 1; return acc; }, {});
+            const tiers: Array<[string, string]> = [
+                ["", this.manager.translator.t("筛选_全部_描述")],
+                ...STARTUP_TIERS.map((tier): [string, string] => [tier, `${this.manager.translator.t(STARTUP_TIER_LABEL_KEYS[tier])} (${tierCounts[tier] || 0})`]),
             ];
-            const delayOperatorDropdown = new DropdownComponent(searchBar.controlEl);
-            delayOperatorDropdown.selectEl.parentElement?.addClass("manager-filter-operator-dropdown");
-            delayOperatorDropdown.selectEl.addClass("manager-filter-operator");
-            delayOperatorDropdown.addOptions(operatorOptions);
-            delayOperatorDropdown.setValue(this.delayOperator);
-            delayOperatorDropdown.selectEl.setAttribute("aria-label", this.manager.translator.t("筛选_延迟取反_标签"));
-            delayOperatorDropdown.onChange((value) => {
-                this.delayOperator = value === "not-contains" ? "not-contains" : "contains";
+            const tierOperatorDropdown = new DropdownComponent(searchBar.controlEl);
+            tierOperatorDropdown.selectEl.parentElement?.addClass("manager-filter-operator-dropdown");
+            tierOperatorDropdown.selectEl.addClass("manager-filter-operator");
+            tierOperatorDropdown.addOptions(operatorOptions);
+            tierOperatorDropdown.setValue(this.startupTierOperator);
+            tierOperatorDropdown.selectEl.setAttribute("aria-label", this.manager.translator.t("筛选_启动阶段取反_标签"));
+            tierOperatorDropdown.onChange((value) => {
+                this.startupTierOperator = value === "not-contains" ? "not-contains" : "contains";
                 void this.reloadShowData();
             });
-            const delaysDropdown = new DropdownComponent(searchBar.controlEl);
-            this.addOrderedOptions(delaysDropdown, delays);
-            delaysDropdown.setValue(this.delay || "");
-            delaysDropdown.onChange((value) => { this.delay = value; void this.reloadShowData(); });
+            const tiersDropdown = new DropdownComponent(searchBar.controlEl);
+            this.addOrderedOptions(tiersDropdown, tiers);
+            tiersDropdown.setValue(this.startupTier || "");
+            tiersDropdown.onChange((value) => { this.startupTier = value; void this.reloadShowData(); });
         }
 
         // [搜索行] 搜索框
@@ -211,10 +212,10 @@ export class HideModal extends Modal {
                     default:
                         break; // 其他情况显示所有插件
                 }
-                // [过滤] 分组 标签 延时
+                // [过滤] 分组 标签 启动阶段
                 if (!this.matchesSingleValueFilter(ManagerPlugin.group, this.group, this.groupOperator)) continue;
                 if (!this.matchesTagFilter(ManagerPlugin.tags, this.tag, this.tagOperator)) continue;
-                if (!this.matchesSingleValueFilter(ManagerPlugin.delay, this.delay, this.delayOperator)) continue;
+                if (!this.matchesSingleValueFilter(ManagerPlugin.startupTier, this.startupTier, this.startupTierOperator)) continue;
                 // [过滤] 搜索
                 if (this.searchText !== "" && ManagerPlugin.name.toLowerCase().indexOf(this.searchText.toLowerCase()) == -1 && ManagerPlugin.desc.toLowerCase().indexOf(this.searchText.toLowerCase()) == -1 && plugin.author.toLowerCase().indexOf(this.searchText.toLowerCase()) == -1) continue;
                 // [过滤] 自身
@@ -241,13 +242,9 @@ export class HideModal extends Modal {
                 const version = createSpan({ text: `[${plugin.version}]`, cls: ["manager-item__name-version"], });
                 itemEl.nameEl.appendChild(version);
 
-                // [默认] 延迟
-                if (this.settings.DELAY && ManagerPlugin.delay !== "") {
-                    const d = this.settings.DELAYS.find((item) => item.id === ManagerPlugin.delay);
-                    if (d) {
-                        const delay = createSpan({ text: `${d.time}s`, cls: ["manager-item__name-delay"], });
-                        itemEl.nameEl.appendChild(delay);
-                    }
+                // [默认] 启动阶段
+                if (this.settings.STAGED_STARTUP && ManagerPlugin.startupTier !== "native") {
+                    itemEl.nameEl.appendChild(createSpan({ text: this.manager.translator.t(STARTUP_TIER_LABEL_KEYS[ManagerPlugin.startupTier]), cls: ["manager-item__name-delay"] }));
                 }
 
                 // [默认] 描述
