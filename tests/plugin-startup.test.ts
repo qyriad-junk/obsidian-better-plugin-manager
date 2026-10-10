@@ -604,3 +604,82 @@ describe("unloads BPM didn't cause and the user didn't make (reloads, updates)",
 		expect(vault.plugins.log.filter((entry) => entry.startsWith("load:"))).toEqual(["load:a", "load:b"]);
 	});
 });
+
+describe("staged startup while things change", () => {
+	const stagedVault = async (ids: string[], tiers: Record<string, StartupTier>) => {
+		const vault = new Vault(ids, { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, ...ids];
+		await vault.launch(); // adopted as wanted; BPM starts them from the next launch
+		for (const [id, tier] of Object.entries(tiers)) vault.record(id).startupTier = tier;
+		await vault.startup.reconcile();
+		await vault.launch({ untilLayoutReady: false });
+		vault.plugins.log = [];
+		return vault;
+	};
+	const loads = (vault: Vault) => vault.plugins.log.filter((entry) => entry.startsWith("load:"));
+
+	test("a pending plugin moved to an earlier tier mid-run still starts (and in its new place)", async () => {
+		const vault = await stagedVault(["r1", "r2", "bg"], { bg: "background" });
+		vault.finishLayout();
+		await vi.advanceTimersToNextTimerAsync(); // r1 started; r2 is next
+		await vault.startup.setStartupTier(["bg"], "after-ready");
+		await advance(1000);
+		expect(loads(vault)).toEqual(["load:r1", "load:r2", "load:bg"]);
+		expect(vault.startup.pendingStarts()).toEqual([]);
+	});
+
+	test("a pending plugin moved to a later tier mid-run waits for its new turn", async () => {
+		const vault = await stagedVault(["r1", "r2", "bg"], { bg: "background" });
+		vault.finishLayout();
+		await vi.advanceTimersToNextTimerAsync();
+		await vault.startup.setStartupTier(["r2"], "background");
+		await advance(1000);
+		expect(loads(vault)).toEqual(["load:r1", "load:r2", "load:bg"]); // r2 comes before bg in list order
+	});
+
+	test("a plugin Obsidian refuses stays wanted, and is tried again next launch", async () => {
+		const vault = await stagedVault(["m", "ok"], {});
+		vault.plugins.refused.add("m");
+		const warnings: unknown[] = [];
+		const warn = vi.spyOn(console, "warn").mockImplementation((...args) => { warnings.push(args); });
+		vault.finishLayout();
+		await advance(1000);
+		await vault.startup.startOnce("ok"); // an unrelated change: adoption runs
+		await settle();
+		warn.mockRestore();
+		expect(warnings).toHaveLength(1);
+		expect(vault.startup.isWanted("m")).toBe(true);
+		await vault.launch({ untilLayoutReady: false });
+		expect(vault.startup.pendingStarts()).toContain("m");
+	});
+
+	test("stop() mid-run hands everything to Obsidian and nothing is started twice", async () => {
+		const vault = await stagedVault(["a", "b", "c"], { c: "background" });
+		vault.plugins.loadDelayMs = 5;
+		vault.finishLayout();
+		await vi.advanceTimersToNextTimerAsync(); // a's load is in flight
+		vault.startup.stop();
+		await advance(5000);
+		expect(loads(vault)).toEqual(["load:a", "load:b", "load:c"]);
+		expect(vault.native()).toEqual([BPM, "a", "b", "c"].sort());
+	});
+
+	test("background plugins wait for requestIdleCallback (with a timeout); after-ready ones don't", async () => {
+		const idle = vi.fn((callback: () => void, _options?: { timeout: number }) => window.setTimeout(callback, 500));
+		const win = window as unknown as { requestIdleCallback?: typeof idle };
+		win.requestIdleCallback = idle;
+		try {
+			const vault = await stagedVault(["r", "bg"], { bg: "background" });
+			vault.finishLayout();
+			await advance(10);
+			expect(loads(vault)).toEqual(["load:r"]);
+			expect(idle).toHaveBeenCalledTimes(1);
+			expect(idle.mock.calls[0][1]).toEqual({ timeout: 1000 });
+			await advance(500);
+			expect(loads(vault)).toEqual(["load:r", "load:bg"]);
+		} finally {
+			delete win.requestIdleCallback;
+		}
+	});
+});

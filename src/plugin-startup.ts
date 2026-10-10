@@ -377,33 +377,35 @@ export class PluginStartup {
 	}
 
 	/**
-	 * Staged startup, once the workspace is ready: start every pending plugin, one at a time, in tier order and BPM's
-	 * list order within a tier. Plugins of the `native` tier that Obsidian didn't start (they were just moved to that
-	 * tier, or were on no list at all) go first. `after-ready` plugins get a yield to the UI between them;
-	 * `background` plugins each wait for Obsidian to be idle.
-	 *
-	 * The tier is read when its turn comes, so changing a pending plugin's tier before then still counts.
+	 * Staged startup, once the workspace is ready: start the pending plugins one at a time, each turn taking whichever
+	 * comes first in {@link pendingStarts} order *right now* (tier order, then BPM's list order), so changing a pending
+	 * plugin's tier counts until it has started. `native`-tier plugins that Obsidian didn't start (just moved to that
+	 * tier, not on the native list yet, or failed natively) go first. Before each start: a yield to the UI, or for
+	 * `background` plugins, a wait for Obsidian to be idle ({@link TIER_PACING}).
 	 */
 	private async runStagedStartup(generation: number): Promise<void> {
 		const readyAt = performance.now();
 		const stillRunning = () => generation === this.generation;
 		let startedAny = false;
-		const phases: { tiers: StartupTier[]; before: () => Promise<void> }[] = [
-			{ tiers: ["native", "after-ready"], before: yieldToUi },
-			{ tiers: ["background"], before: waitForIdle },
-		];
-		for (const phase of phases) {
-			for (const id of this.pendingStarts().filter((id) => phase.tiers.includes(this.getStartupTier(id)))) {
-				await phase.before();
-				if (!stillRunning()) return;
-				if (!this.pending.delete(id) || !this.isWanted(id) || this.isLoaded(id)) continue;
-				const startedAt = performance.now();
-				const ok = await this.load(id, false);
-				const finishedAt = performance.now();
-				startedAny = true;
-				this.host.log(`${ok ? "started" : "couldn't start"} ${id} (${this.getStartupTier(id)}) `
-					+ `${Math.round(startedAt - readyAt)} ms after layout-ready; onload took ${Math.round(finishedAt - startedAt)} ms`);
+		for (let next = this.pendingStarts()[0]; next !== undefined; next = this.pendingStarts()[0]) {
+			await TIER_PACING[this.getStartupTier(next)]();
+			if (!stillRunning()) return;
+			// The queue may have changed while waiting (tier changes, plugins started or switched off meanwhile).
+			const id = this.pendingStarts()[0];
+			if (id === undefined) break;
+			this.pending.delete(id);
+			if (!this.isWanted(id) || this.isLoaded(id)) continue;
+			const startedAt = performance.now();
+			let ok = false;
+			try {
+				ok = await this.load(id, false);
+			} catch (error) {
+				console.error(`[BPM] Starting ${id} failed`, error);
 			}
+			startedAny = true;
+			if (!ok) console.warn(`[BPM] Obsidian didn't start ${id} (it may be desktop-only, need a newer Obsidian, or have failed in its onload).`);
+			this.host.log(`${ok ? "started" : "couldn't start"} ${id} (${this.getStartupTier(id)}) `
+				+ `${Math.round(startedAt - readyAt)} ms after layout-ready; onload took ${Math.round(performance.now() - startedAt)} ms`);
 		}
 		// Some plugins add their ribbon icons a little after onload (e.g. from onLayoutReady): catch those too.
 		if (startedAny) window.setTimeout(() => { if (stillRunning()) this.syncLateStartLayout(); }, 2000);
@@ -595,6 +597,13 @@ export class PluginStartup {
 		return ok;
 	}
 }
+
+/** What BPM waits for before starting a plugin of each tier in a staged startup. */
+const TIER_PACING: Record<StartupTier, () => Promise<void>> = {
+	"native": yieldToUi,
+	"after-ready": yieldToUi,
+	"background": waitForIdle,
+};
 
 /** Let Obsidian handle input and paint before the next plugin starts. */
 function yieldToUi(): Promise<void> {
