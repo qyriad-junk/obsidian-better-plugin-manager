@@ -8,6 +8,8 @@
 //
 // Each load is recorded in window.__bpmSandboxLoads as
 // { id, startedAt, finishedAt, layoutReady } (ms since page load), so tests can check *when* BPM started it.
+// Each onExternalSettingsChange() call (data.json changed on disk by something else, e.g. Sync) is recorded in
+// window.__bpmSandboxExternalSettings as { id, at, data }.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,6 +53,9 @@ module.exports = class SandboxPlugin extends Plugin {
 		(window.__bpmSandboxLoads ??= []).push({
 			id: ${JSON.stringify(id)}, startedAt, finishedAt: performance.now(), layoutReady: this.app.workspace.layoutReady,
 		});
+	}
+	async onExternalSettingsChange() {
+		(window.__bpmSandboxExternalSettings ??= []).push({ id: ${JSON.stringify(id)}, at: performance.now(), data: await this.loadData() });
 	}
 };
 `);
