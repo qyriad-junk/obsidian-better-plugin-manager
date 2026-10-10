@@ -61,6 +61,9 @@ currently blurred, and names them distinctly so the difference survives in hover
 - Every caller moves onto it: `command.ts`, the modal's card toggle and bulk toggle, troubleshoot, transfer import,
   GitHub install/update, source auto-update, self-check.
 
+**Added 2026-10-10:** BPM forwards external `data.json` change notifications (Sync etc.) to the plugins it started,
+which Obsidian only does for its native startup list.
+
 **Fixes for free:** updates no longer force-enable plugins (*annoyance 5*); fresh installs actually load;
 install/import respect delay mode; the takeover dance mostly disappears (the native list is always derived, so there's
 nothing to "take over"); the six disagreeing `isEnabled` checks collapse into one.
@@ -77,6 +80,11 @@ Pulled out of `main.ts` and owned by step 1's module.
 - Load delayed plugins **one at a time with a yield between them**, instead of firing every same-delay timer at once.
 - Delays become **fractional seconds** in the UI (number input, not an integer 0–100 slider) (*annoyance 6*).
 - After each batch, **re-apply the saved ribbon layout** (step 6), which fixes delay-loaded plugins' hidden ribbon items reappearing.
+- **Migration** (agreed 2026-10-08): every delayed plugin → "after ready"; delays ≥ 5 s → "background". Before the
+  settings are rewritten, BPM writes a one-time backup of its original `data.json` next to it.
+- Optional "after synced" tier for plugins whose point is receiving synced settings: wait for Sync's `"Fully synced"`
+  status (with a timeout; immediate if Sync is off/disconnected/paused). Internals in codebase-notes.md. Only helps the
+  first sync after launch; later synced changes reach BPM-started plugins through the forwarding below.
 - In debug mode, log when each plugin was started and how long its `onload` took, so delays can be tuned with data.
 
 ## 3. Delete dead code and upstream branding

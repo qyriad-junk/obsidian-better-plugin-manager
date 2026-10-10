@@ -134,6 +134,8 @@ touches `app.plugins.enabledPlugins` (except the dead developer-mode buttons rel
   `applyInstalledFiles(id, { wantedIfNew })` (installs/updates: read manifest, keep on/off, reload if running).
 - `userInitiated: true` mirrors Obsidian's own toggle (`onUserEnable()`; panes closed on disable). Delayed starts,
   troubleshooting and imports pass false.
+- External `data.json` changes: Obsidian notifies only native-list plugins, so `start()` also subscribes to vault `raw`
+  and forwards `onConfigFileChange()` to the running plugins BPM started (see internals table).
 
 ### Delay-start mechanics
 - **When the delay clock starts:** Obsidian's startup order is core plugins → community plugins (`plugins.initialize()`,
@@ -177,7 +179,7 @@ All undocumented, typed loosely in `src/obsidian-internals.ts` or via `@ts-ignor
 | `disablePlugin(id)` | | unload only |
 | `enablePluginAndSave` / `disablePluginAndSave` | normal-mode toggles | `enablePlugin(id,true)` then `enabledPlugins.add` + `requestSaveConfig()` (debounced 1 s) / `enabledPlugins.delete` + `requestSaveConfig()` + `disablePlugin(id,true)` |
 | `saveConfig()` | (not used by BPM) | writes `Array.from(enabledPlugins)` to `community-plugins.json` |
-| vault `raw` → `plugins.onRaw` | | **never re-reads `community-plugins.json`**; only calls `plugin.onConfigFileChange()` for `<id>/data.json` changes, and only if `enabledPlugins.has(id)` |
+| vault `raw` → `plugins.onRaw` | `PluginStartup` forwards for BPM-started plugins | **never re-reads `community-plugins.json`**; only calls `plugin.onConfigFileChange()` for `<pluginFolder>/<id>/data.json` changes, and only if `enabledPlugins.has(id)`. `onConfigFileChange` = 50 ms debounce → stat `data.json`, and if mtime > `_lastDataModifiedTime` (set by `loadData`/`saveData`) call the public `onExternalSettingsChange()` (API ≥ 1.5.7) and `settingTab.update()`. Raw events come from the adapter's watcher (desktop: `watchHiddenRecursive` covers the config dir); generic, not Sync-specific. Hotkeys, snippets and property types reload through the same path. |
 | `installPlugin(repo, version, manifest)`, `uninstallPlugin`, `loadManifests` | protocol install, delete | |
 | `app.setting.open/openTabById/activeTab` | open plugin settings / hotkeys tab | |
 | `app.commands.removeCommand`, `.commands` | dynamic command refresh | |
@@ -190,8 +192,11 @@ Consequences worth internalising:
 - Writing `community-plugins.json` directly (as the old self-check takeover did) leaves Obsidian's in-memory `enabledPlugins` stale, so the
   next `*AndSave` from anywhere rewrites the file from memory and silently undoes the takeover. The correct move is to mutate
   `app.plugins.enabledPlugins` and call `saveConfig()`/`requestSaveConfig()`.
-- Plugins started by BPM's delay mode are not in `enabledPlugins`, so they **never get `onConfigFileChange()`** (e.g. when
-  Obsidian Sync updates their `data.json`). That's a real, undocumented cost of delay mode.
+- Plugins started by BPM's delay mode are not in `enabledPlugins`, so Obsidian never calls their `onConfigFileChange()`
+  (e.g. when Obsidian Sync updates their `data.json`). **Fixed** (2026-10-10): `PluginStartup.forwardConfigFileChange`
+  listens to the same vault `raw` event and calls it for running plugins *not* on the native list, so each plugin is
+  notified once, through Obsidian's own mtime check. Verified in the sandbox. Plugins that don't implement
+  `onExternalSettingsChange` ignore external changes either way (natively too).
 - Editing the startup list doesn't require reloading plugins at all (see the delay toggle above).
 - **Why hidden ribbon icons of delay-loaded plugins come back** (any lazy loader, not just BPM): at layout load the
   plugin's ribbon item doesn't exist yet, so `leftRibbon.load()` skips its saved `hidden: true`; when the plugin later
@@ -336,5 +341,17 @@ plugin is adopted too [R]) · six disagreeing "is it enabled?" implementations �
 - Answered: native ribbon persistence does *not* survive lazy loading (see internals); the fix is to re-apply it by id.
 - Does `require("electron")` (top-level import in `utils.ts`) behave on mobile? The plugin claims mobile support, so presumably
   it resolves harmlessly, but nothing in the code guards it.
-- BPM-started plugins still never get `onConfigFileChange()` (Obsidian only calls it for ids in `enabledPlugins`), so
-  e.g. Obsidian Sync updating their data.json goes unnoticed until restart. Could BPM forward those raw events itself?
+- Answered: BPM-started plugins missing `onConfigFileChange()`; BPM forwards it now (see internals).
+- Mobile: does the mobile adapter emit `raw` for config-dir files promptly? Its watcher is a rescan (`quickList` /
+  `listRecursiveChild`), so presumably yes but later. Unverified.
+
+### Obsidian Sync internals (for a possible "after synced" startup tier)
+
+Statically read from 1.13.7 `app.js`, with the not-logged-in shape checked in the sandbox:
+`app.internalPlugins.getPluginById("sync")` → `{ enabled, instance }`. The instance is an `Events` emitter:
+- `instance.on("status-change", cb)`: fired by `setStatus(text)`, `requestSync` start/end, errors, `setDirty`.
+- `instance.getStatus()`: `"uninitialized"` | `"disconnected"` (no remote vault) | `"error"` | `"paused"` | `"syncing"` |
+  `"synced"`. Note `"synced"` just means "not currently syncing", so it's also true *before* the first pass starts.
+- `instance.syncStatus`: the status-bar text. After a pass with nothing left to do, Sync logs and sets the literal
+  `"Fully synced"` (not localized). That's the signal an "after synced" tier would wait for (with a timeout, and
+  immediately when Sync is disabled, disconnected or paused).
