@@ -32,6 +32,8 @@ class Vault {
 			settings: this.settings,
 			// Like Manager.saveSettings(): reconcile, then persist.
 			saveSettings: async () => { await this.startup?.reconcile(); this.saves++; },
+			pluginFolder: this.plugins.pluginFolder,
+			onVaultRaw: (callback) => this.plugins.onVaultRaw(callback),
 			createRecord: (id, wanted) => {
 				const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: "", note: "" };
 				this.settings.Plugins.push(record);
@@ -372,5 +374,50 @@ describe("single start and restart", () => {
 			expect(vault.plugins.log).toEqual(["unload:a", "load:a"]);
 			expect(vault.native()).toEqual(native);
 		}
+	});
+});
+
+describe("external settings changes (data.json changed on disk, e.g. by Sync)", () => {
+	test("reach BPM-started plugins exactly once, and native ones only via Obsidian", async () => {
+		const vault = new Vault(["native", "delayed"]);
+		vault.settings.DELAY = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "native", "delayed"];
+		await vault.launch();
+		await vault.startup.setIgnored("native", true);
+		await vault.launch();
+		await settle();
+		expect(vault.plugins.loaded()).toEqual([BPM, "delayed", "native"].sort());
+
+		vault.plugins.emitRaw(".obsidian/plugins/native/data.json");
+		vault.plugins.emitRaw(".obsidian/plugins/delayed/data.json");
+		expect(vault.plugins.plugins.native.configFileChanges).toBe(1); // Obsidian's own forwarding, not doubled
+		expect(vault.plugins.plugins.delayed.configFileChanges).toBe(1); // BPM's forwarding
+	});
+
+	test("ignore other files, and plugins that aren't running", async () => {
+		const vault = new Vault(["a", "off"]);
+		vault.settings.DELAY = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await vault.launch();
+		await vault.launch();
+		await settle();
+		vault.plugins.emitRaw(".obsidian/plugins/a/main.js");
+		vault.plugins.emitRaw(".obsidian/plugins/a/sub/data.json");
+		vault.plugins.emitRaw(".obsidian/plugins/off/data.json");
+		vault.plugins.emitRaw("notes/data.json");
+		expect(vault.plugins.plugins.a.configFileChanges).toBe(0);
+	});
+
+	test("stop forwarding once BPM is unloaded", async () => {
+		const vault = new Vault(["a"]);
+		vault.settings.DELAY = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await vault.launch();
+		await vault.launch();
+		await settle();
+		vault.startup.stop();
+		vault.plugins.enabledPlugins.delete("a"); // isolate BPM's forwarding from Obsidian's
+		vault.plugins.emitRaw(".obsidian/plugins/a/data.json");
+		expect(vault.plugins.plugins.a.configFileChanges).toBe(0);
 	});
 });

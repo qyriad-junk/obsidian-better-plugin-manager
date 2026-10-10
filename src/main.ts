@@ -1,4 +1,4 @@
-import { normalizePath, ObsidianProtocolData, Plugin, PluginManifest, Workspace } from 'obsidian';
+import { EventRef, normalizePath, ObsidianProtocolData, Plugin, PluginManifest, Workspace } from 'obsidian';
 import { DEFAULT_SETTINGS, ManagerSettings, PluginUpdateCheckMode, ReleaseCompatibilityMode } from './settings/data';
 import { ManagerSettingTab } from './settings';
 import { Translator } from './lang/inxdex';
@@ -451,6 +451,14 @@ export default class Manager extends Plugin {
             registry: this.appPlugins,
             get settings() { return manager.settings; },
             saveSettings: () => this.saveSettings(),
+            pluginFolder: `${this.app.vault.configDir}/plugins`,
+            onVaultRaw: (callback) => {
+                // "raw" (every change seen on disk, config dir included) isn't in Obsidian's public typings.
+                const vault = this.app.vault as unknown as { on(name: "raw", callback: (path: string) => void): EventRef };
+                const ref = vault.on("raw", callback);
+                this.registerEvent(ref);
+                return () => this.app.vault.offref(ref);
+            },
             createRecord: (id, wanted) => {
                 const record = this.createPluginRecord(id, wanted);
                 this.settings.Plugins.push(record);

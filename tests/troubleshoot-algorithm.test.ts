@@ -30,6 +30,8 @@ async function setup(pluginCount: number, delayMode: boolean) {
 		registry: plugins as unknown as PluginStartupRegistry,
 		settings,
 		saveSettings: () => manager.saveSettings(),
+		pluginFolder: plugins.pluginFolder,
+		onVaultRaw: (callback) => plugins.onVaultRaw(callback),
 		createRecord: (id, wanted) => {
 			const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: "", note: "" };
 			settings.Plugins.push(record);

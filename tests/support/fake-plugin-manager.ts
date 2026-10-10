@@ -1,5 +1,14 @@
 import type { EventRef, PluginManifest } from "obsidian";
 
+/** A loaded plugin instance, as far as BPM cares. */
+export interface FakePluginInstance {
+	id: string;
+	userEnabled: boolean;
+	/** How many times onConfigFileChange() was called (Obsidian's "your data.json changed on disk" hook). */
+	configFileChanges: number;
+	onConfigFileChange(): void;
+}
+
 /**
  * In-memory stand-in for Obsidian's `app.plugins` (its internal PluginManager).
  *
@@ -15,7 +24,9 @@ import type { EventRef, PluginManifest } from "obsidian";
  */
 export class FakePluginManager {
 	manifests: Record<string, PluginManifest> = {};
-	plugins: Record<string, { id: string; userEnabled: boolean }> = {};
+	plugins: Record<string, FakePluginInstance> = {};
+	/** `<configDir>/plugins`, as in Obsidian's getPluginFolder(). */
+	pluginFolder = ".obsidian/plugins";
 	enabledPlugins = new Set<string>();
 
 	/** Plugin folders present on disk; `loadManifests()` copies them into `manifests`. */
@@ -27,6 +38,7 @@ export class FakePluginManager {
 
 	private changeTimer: ReturnType<typeof setTimeout> | null = null;
 	private listeners = new Set<() => void>();
+	private rawListeners = new Set<(path: string) => void>();
 
 	on(_name: "changed", callback: () => void): EventRef {
 		this.listeners.add(callback);
@@ -49,6 +61,7 @@ export class FakePluginManager {
 	 */
 	async startup(): Promise<void> {
 		this.listeners.clear();
+		this.rawListeners.clear();
 		if (this.changeTimer) clearTimeout(this.changeTimer);
 		this.changeTimer = null;
 		this.plugins = {};
@@ -64,7 +77,7 @@ export class FakePluginManager {
 	async enablePlugin(id: string, userEnable = false): Promise<boolean> {
 		if (!this.manifests[id]) return false;
 		if (!this.plugins[id]) {
-			this.plugins[id] = { id, userEnabled: userEnable };
+			this.plugins[id] = { id, userEnabled: userEnable, configFileChanges: 0, onConfigFileChange() { this.configFileChanges++; } };
 			this.log.push(`load:${id}`);
 		}
 		this.didChange();
@@ -123,6 +136,25 @@ export class FakePluginManager {
 			this.changeTimer = null;
 			for (const listener of [...this.listeners]) listener();
 		}, 0);
+	}
+
+	/** Subscribe to vault "raw" events (what BPM gets via app.vault.on("raw", …)). */
+	onVaultRaw(callback: (path: string) => void): () => void {
+		this.rawListeners.add(callback);
+		return () => this.rawListeners.delete(callback);
+	}
+
+	/**
+	 * A file changed on disk (vault "raw" event). Like Obsidian, first do PluginManager.onRaw's own forwarding (only for
+	 * plugins on the native startup list), then everyone else listening.
+	 */
+	emitRaw(path: string): void {
+		const prefix = `${this.pluginFolder}/`;
+		if (path.startsWith(prefix) && path.endsWith("/data.json")) {
+			const id = path.slice(prefix.length, -"/data.json".length);
+			if (this.enabledPlugins.has(id)) this.plugins[id]?.onConfigFileChange();
+		}
+		for (const listener of [...this.rawListeners]) listener(path);
 	}
 
 	/** Await pending "changed" events (and anything else queued behind a 0 ms timeout). */

@@ -42,6 +42,10 @@ export interface PluginStartupHost {
 	saveSettings(): Promise<void>;
 	/** Create the BPM record for an installed plugin that doesn't have one yet. */
 	createRecord(id: string, wanted: boolean): ManagerPlugin;
+	/** `<configDir>/plugins`, Obsidian's plugin folder. */
+	readonly pluginFolder: string;
+	/** Subscribe to the vault's "raw" events (every file change seen on disk, config dir included). Returns an unsubscribe. */
+	onVaultRaw(callback: (path: string) => void): () => void;
 }
 
 export interface SetWantedOptions {
@@ -64,6 +68,7 @@ export class PluginStartup {
 	/** What's running as far as BPM knows (it updates this *before* each load/unload it causes). */
 	private knownLoaded = new Set<string>();
 	private changeRef: EventRef | null = null;
+	private stopWatchingRaw: (() => void) | null = null;
 	private delayedStarts = new Map<string, Timer>();
 
 	constructor(host: PluginStartupHost) {
@@ -300,9 +305,27 @@ export class PluginStartup {
 
 		if (this.host.settings.DELAY) this.scheduleDelayedStarts();
 
+		this.stopWatchingRaw = this.host.onVaultRaw((path) => this.forwardConfigFileChange(path));
+
 		this.changeRef = this.registry.on("changed", () => {
 			if (this.adoptExternalChanges()) void this.host.saveSettings();
 		});
+	}
+
+	/**
+	 * When a plugin's data.json changes on disk (Obsidian Sync, Syncthing, git…), Obsidian calls that plugin's
+	 * onConfigFileChange(), which in turn calls the public onExternalSettingsChange() if the file is newer than the
+	 * plugin's own last save. But Obsidian only does that for plugins on its native startup list (PluginManager.onRaw
+	 * checks enabledPlugins), so plugins BPM started would never hear about it. Forward it for exactly those.
+	 * The path rule mirrors Obsidian's: `<pluginFolder>/<id>/data.json`.
+	 */
+	private forwardConfigFileChange(path: string): void {
+		const prefix = `${this.host.pluginFolder}/`;
+		if (!path.startsWith(prefix) || !path.endsWith("/data.json")) return;
+		const id = path.slice(prefix.length, -"/data.json".length);
+		if (id.includes("/") || this.registry.enabledPlugins.has(id)) return; // Obsidian handles native ones itself.
+		const plugin = this.registry.plugins?.[id] as { onConfigFileChange?: () => void } | undefined;
+		plugin?.onConfigFileChange?.();
 	}
 
 	private scheduleDelayedStarts(): void {
@@ -340,6 +363,8 @@ export class PluginStartup {
 	stop(): void {
 		if (this.changeRef) this.registry.offref(this.changeRef);
 		this.changeRef = null;
+		this.stopWatchingRaw?.();
+		this.stopWatchingRaw = null;
 		const pending = this.pendingStarts();
 		for (const id of pending) this.cancelScheduledStart(id);
 
