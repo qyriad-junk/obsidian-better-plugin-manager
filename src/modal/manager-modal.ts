@@ -4,6 +4,7 @@ import {
     DropdownComponent,
     ExtraButtonComponent,
     Menu,
+    MenuItem,
     Modal,
     Notice,
     PluginManifest,
@@ -552,6 +553,40 @@ export class ManagerModal extends Modal {
             ["", allLabel],
             ...this.settings.TAGS.map((item): [string, string] => [item.id, `${item.name} [${tagCounts[item.id] || 0}]`]),
         ];
+    }
+
+    /** Whether the plugin menu offers a startup tier: with staged startup on, for plugins BPM manages. */
+    private canSetStartupTier(pluginId: string): boolean {
+        return this.settings.STAGED_STARTUP && this.manager.pluginStartup.isManaged(pluginId) && this.manager.pluginStartup.isInstalled(pluginId);
+    }
+
+    /**
+     * "Startup tier ▸ With Obsidian / After ready / Background" in a plugin's menu. A submenu on desktop (Obsidian's
+     * MenuItem.setSubmenu, which isn't in its public typings); on mobile, or without it, the tiers as items of their
+     * own. Changing it only refreshes that plugin's card, so the list keeps its scroll position.
+     */
+    private addStartupTierMenu(menu: Menu, pluginId: string): void {
+        if (!this.canSetStartupTier(pluginId)) return;
+        const t = this.manager.translator;
+        const current = this.manager.pluginStartup.getStartupTier(pluginId);
+        const addTier = (target: Menu, tier: StartupTier, title: string) => target.addItem((item) => item
+            .setTitle(title)
+            .setIcon(STARTUP_TIER_ICONS[tier])
+            .setChecked(tier === current)
+            .onClick(async () => {
+                if (tier === current) return;
+                await this.manager.pluginStartup.setStartupTier([pluginId], tier);
+                this.refreshPluginCard(pluginId);
+            }));
+        if (!Platform.isMobile && "setSubmenu" in MenuItem.prototype) {
+            menu.addItem((item) => {
+                item.setTitle(t.t("通用_启动阶段_文本")).setIcon(STARTUP_TIER_ICONS[current]);
+                const submenu = (item as MenuItem & { setSubmenu(): Menu }).setSubmenu();
+                for (const tier of STARTUP_TIERS) addTier(submenu, tier, t.t(STARTUP_TIER_LABEL_KEYS[tier]));
+            });
+        } else {
+            for (const tier of STARTUP_TIERS) addTier(menu, tier, `${t.t("通用_启动阶段_文本")}: ${t.t(STARTUP_TIER_LABEL_KEYS[tier])}`);
+        }
     }
 
     /** The small label after a plugin's name saying when BPM starts it (only for plugins BPM starts itself). */
@@ -3149,7 +3184,7 @@ export class ManagerModal extends Modal {
                 }
                 // 第二组：插件管理类
                 const hasIgnoredEnableMenuItem = Boolean(currentIsBpmIgnored && this.isMainPageActionInMenu("enableIgnored"));
-                const hasManageMenuItems = this.isMainPageActionInMenu("singleStart") || this.isMainPageActionInMenu("restart") || hasIgnoredEnableMenuItem || this.isMainPageActionInMenu("hide");
+                const hasManageMenuItems = this.isMainPageActionInMenu("singleStart") || this.isMainPageActionInMenu("restart") || hasIgnoredEnableMenuItem || this.isMainPageActionInMenu("hide") || this.canSetStartupTier(plugin.id);
                 if (hasManageMenuItems) addContextSeparator();
                 // [菜单] 单次启动
                 if (this.isMainPageActionInMenu("singleStart")) menu.addItem((item) =>
@@ -3187,6 +3222,8 @@ export class ManagerModal extends Modal {
                             this.togglePluginHidden(plugin.id);
                         })
                 );
+                // [菜单] 启动阶段
+                this.addStartupTierMenu(menu, plugin.id);
                 if (hasManageMenuItems) hasContextMenuItems = true;
                 // [菜单] 分享插件
                 // menu.addItem((item) =>
@@ -3643,6 +3680,11 @@ export class ManagerModal extends Modal {
                                     if (isSelf) return;
                                     this.togglePluginHidden(plugin.id);
                                 }));
+                            hasCurrentGroup = true;
+                        }
+                        if (this.canSetStartupTier(plugin.id)) {
+                            if (hasPreviousGroup && !hasCurrentGroup) menu.addSeparator();
+                            this.addStartupTierMenu(menu, plugin.id);
                             hasCurrentGroup = true;
                         }
                         hasPreviousGroup = hasPreviousGroup || hasCurrentGroup;
