@@ -5,35 +5,9 @@ import type { ObsidianPluginRegistry } from "./obsidian-internals";
 import { DEFAULT_STARTUP_TIER, isStartupTier, STARTUP_TIERS } from "./startup-tiers";
 import type { StartupTier } from "./startup-tiers";
 
-/**
- * The one place that decides which community plugins run, and how they get started.
- *
- * Three things that are easy to conflate, kept apart here:
- *
- * - **wanted**: the user wants this plugin running in this vault. The source of truth is BPM's own record
- *   (`ManagerPlugin.enabled`), in staged-startup mode and outside it alike.
- * - **native startup list**: what Obsidian itself loads at launch, i.e. `app.plugins.enabledPlugins`, persisted to
- *   community-plugins.json by `saveConfig()`. BPM *derives* it: BPM itself, `bpm-ignore` plugins as the user left
- *   them, and every wanted plugin, except, in staged-startup mode, those whose {@link StartupTier} says
- *   BPM starts them after the workspace is ready.
- * - **loaded**: running right now (`app.plugins.plugins[id]`).
- *
- * `bpm-ignore` means "Obsidian's native startup list is authoritative for this plugin": BPM mirrors its native state
- * into the record and never schedules it.
- *
- * BPM never calls `enablePluginAndSave` / `disablePluginAndSave`, and every load/unload BPM causes goes through this
- * class. So a change BPM didn't make is the user toggling a plugin in Obsidian's own settings (or the CLI), and it's
- * adopted as their intent (see {@link PluginStartup.adoptExternalChanges}). Note that Obsidian's own toggle shows
- * whether a plugin is *running*: switching off a plugin BPM started only unloads it, without touching the native list.
- *
- * Obsidian internals relied on here are documented in docs/codebase-notes.md and modelled by
- * tests/support/fake-plugin-manager.ts.
- */
-export type PluginStartupRegistry = Pick<ObsidianPluginRegistry, "manifests" | "plugins" | "enabledPlugins" | "enablePlugin" | "disablePlugin" | "loadManifests"> & {
-	saveConfig(): Promise<void>;
-	on(name: "changed", callback: () => void): EventRef;
-	offref(ref: EventRef): void;
-};
+/** The parts of Obsidian's plugin manager (`app.plugins`) PluginStartup uses. */
+export type PluginStartupRegistry = Pick<ObsidianPluginRegistry,
+	"manifests" | "plugins" | "enabledPlugins" | "enablePlugin" | "disablePlugin" | "loadManifests" | "saveConfig" | "on" | "offref">;
 
 export interface PluginStartupHost {
 	/** BPM's own plugin id. BPM is always on the native startup list and is never touched here. */
@@ -70,6 +44,32 @@ export interface SetWantedOptions {
 	userInitiated?: boolean;
 }
 
+/**
+ * The one place that decides which community plugins run, and how they get started.
+ *
+ * Three things that are easy to conflate, kept apart here:
+ *
+ * - **wanted**: the user wants this plugin running in this vault. The source of truth is BPM's own record
+ *   (`ManagerPlugin.enabled`), in staged-startup mode and outside it alike.
+ * - **native startup list**: what Obsidian itself loads at launch, i.e. `app.plugins.enabledPlugins`, persisted to
+ *   community-plugins.json by `saveConfig()`. BPM *derives* it: BPM itself, `bpm-ignore` plugins as the user left
+ *   them, and every wanted plugin, except, in staged-startup mode, those whose {@link StartupTier} says
+ *   BPM starts them after the workspace is ready.
+ * - **loaded**: running right now (`app.plugins.plugins[id]`).
+ *
+ * `bpm-ignore` means "Obsidian's native startup list is authoritative for this plugin": BPM mirrors its native state
+ * into the record and never schedules it.
+ *
+ * BPM never calls `enablePluginAndSave` / `disablePluginAndSave`, and every load/unload BPM causes goes through this
+ * class (apart from uninstalling, and the developer-mode buttons reloading BPM itself). So a change to the native list
+ * that BPM didn't make, or an unload Obsidian marks as the user's, is the user toggling a plugin in Obsidian's own
+ * settings (or the CLI), and it's adopted as their intent (see {@link PluginStartup.adoptExternalChanges}). Note that
+ * Obsidian's own toggle shows whether a plugin is *running*: switching off a plugin BPM started only unloads it,
+ * without touching the native list.
+ *
+ * Obsidian internals relied on here are documented in docs/codebase-notes.md and modelled by
+ * tests/support/fake-plugin-manager.ts.
+ */
 export class PluginStartup {
 	private readonly host: PluginStartupHost;
 	/** The native startup list as BPM last left it, to tell the user's native toggles apart from BPM's own writes. */
@@ -101,7 +101,7 @@ export class PluginStartup {
 	// ---------------------------------------------------------------------------------------------
 	// Queries
 
-	getRecord(id: string): ManagerPlugin | undefined {
+	private getRecord(id: string): ManagerPlugin | undefined {
 		return this.host.settings.Plugins.find((plugin) => plugin.id === id);
 	}
 
@@ -110,7 +110,7 @@ export class PluginStartup {
 	}
 
 	/** Tagged `bpm-ignore`: Obsidian's native startup list is authoritative, BPM never schedules it. */
-	isIgnored(id: string): boolean {
+	private isIgnored(id: string): boolean {
 		return Boolean(this.getRecord(id)?.tags?.includes(BPM_IGNORE_TAG));
 	}
 
@@ -155,7 +155,7 @@ export class PluginStartup {
 	 * The native startup list as it should be. Keeps the current order (Obsidian starts plugins in list order) and
 	 * appends newly added plugins in BPM's record order.
 	 */
-	desiredNativeList(): string[] {
+	private desiredNativeList(): string[] {
 		const current = Array.from(this.registry.enabledPlugins);
 		const desired = current.filter((id) => this.shouldBeOnNativeList(id));
 		const present = new Set(desired);
@@ -172,7 +172,7 @@ export class PluginStartup {
 	 * Make the native startup list match {@link desiredNativeList}, persisting it only if it changed.
 	 * Never loads or unloads anything: what's running right now is unaffected.
 	 */
-	async syncNativeStartupList(): Promise<void> {
+	private async syncNativeStartupList(): Promise<void> {
 		const desired = this.desiredNativeList();
 		const current = Array.from(this.registry.enabledPlugins);
 		const lastKnown = this.knownNativeList;
@@ -204,7 +204,7 @@ export class PluginStartup {
 	 * Loads aren't adopted on their own: native enables also add to the native list, and anything else (another plugin
 	 * starting one) isn't a statement of intent.
 	 */
-	adoptExternalChanges(): boolean {
+	private adoptExternalChanges(): boolean {
 		const native = new Set(this.registry.enabledPlugins);
 		const instances = new Map<string, unknown>(Object.entries(this.registry.plugins ?? {}));
 		const external = (id: string) => id !== this.host.selfId && !this.isIgnored(id);
@@ -331,6 +331,7 @@ export class PluginStartup {
 	 * 4. Watch for native toggles from now on.
 	 */
 	async start(): Promise<void> {
+		if (this.changeRef) throw new Error("PluginStartup.start() called twice");
 		this.knownIgnored = this.currentlyIgnored();
 		this.knownInstances = new Map(Object.entries(this.registry.plugins ?? {}));
 		let recordsChanged = false;
@@ -350,13 +351,15 @@ export class PluginStartup {
 				if (this.isManaged(id) && this.isWanted(id) && !this.isLoaded(id)) this.pending.add(id);
 			}
 			const generation = this.generation;
-			this.host.onLayoutReady(() => void this.runStagedStartup(generation));
+			this.host.onLayoutReady(() => {
+				this.runStagedStartup(generation).catch((error) => console.error("[BPM] Staged startup failed", error));
+			});
 		}
 
 		this.stopWatchingRaw = this.host.onVaultRaw((path) => this.forwardConfigFileChange(path));
 
 		this.changeRef = this.registry.on("changed", () => {
-			if (this.adoptExternalChanges()) void this.host.saveSettings();
+			if (this.adoptExternalChanges()) this.host.saveSettings().catch((error) => console.error("[BPM] Saving settings failed", error));
 		});
 	}
 
@@ -457,7 +460,8 @@ export class PluginStartup {
 
 	/**
 	 * Turn a plugin on or off: record the intent, load/unload it now, and update the native startup list.
-	 * Works for `bpm-ignore` plugins too (troubleshooting needs that); for them only the native list is changed.
+	 * Works for `bpm-ignore` plugins too (troubleshooting needs that); for them the native list is edited directly instead
+	 * of being derived.
 	 *
 	 * Returns false if nothing could be done: BPM itself, a plugin that isn't installed, or Obsidian refusing to
 	 * load it (e.g. desktop-only on mobile, or blocklisted). The intent isn't recorded in that case.
@@ -574,8 +578,8 @@ export class PluginStartup {
 	/**
 	 * After an install or update has written a plugin's files: make Obsidian read the new manifest, then bring the
 	 * plugin to the state it should be in. A fresh install is wanted (that's why it was installed) unless
-	 * `wantedIfNew` says otherwise; an update keeps its wanted state, and is reloaded if it was running, so the new
-	 * code takes effect.
+	 * `wantedIfNew` says otherwise, or Obsidian refuses to load it; an update keeps its wanted state, and is reloaded if
+	 * it was running (so the new code takes effect), or started if it's wanted but wasn't running.
 	 */
 	async applyInstalledFiles(id: string, options: { wantedIfNew?: boolean } = {}): Promise<boolean> {
 		const isNew = !this.getRecord(id) && !this.isInstalled(id);

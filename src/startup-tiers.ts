@@ -8,10 +8,10 @@
  *
  * Outside staged-startup mode every wanted plugin is started natively, whatever its tier.
  */
-export type StartupTier = "native" | "after-ready" | "background";
+export type StartupTier = (typeof STARTUP_TIERS)[number];
 
-/** In start order. */
-export const STARTUP_TIERS: readonly StartupTier[] = ["native", "after-ready", "background"];
+/** Every startup tier, in start order. */
+export const STARTUP_TIERS = ["native", "after-ready", "background"] as const;
 
 /** What Obsidian itself would do. */
 export const DEFAULT_STARTUP_TIER: StartupTier = "native";
@@ -106,8 +106,8 @@ export const STARTUP_TIER_LABEL_KEYS = {
 } as const satisfies Record<StartupTier, string>;
 
 /** Icons (Lucide) for each tier. */
-export const STARTUP_TIER_ICONS: Record<StartupTier, string> = {
+export const STARTUP_TIER_ICONS = {
 	"native": "zap",
 	"after-ready": "timer",
 	"background": "hourglass",
-};
+} as const satisfies Record<StartupTier, string>;

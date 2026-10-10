@@ -146,7 +146,7 @@ export interface ManagerSettings {
     FILTER_TAG: string;
     FILTER_TAG_VALUES?: string[];
     FILTER_TAG_OPERATOR: FilterOperator;
-    /** Persisted startup-tier filter (only with PERSISTENCE and STAGED_STARTUP on). */
+    /** Persisted startup-tier filter (with PERSISTENCE on; unvalidated tier ids). Ignored while STAGED_STARTUP is off. */
     FILTER_STARTUP_TIER_VALUES?: string[];
     FILTER_STARTUP_TIER_OPERATOR: FilterOperator;
 

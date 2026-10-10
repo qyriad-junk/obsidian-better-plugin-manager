@@ -687,8 +687,11 @@ export class ManagerModal extends Modal {
         return this.normalizeFilterOperator(this.settings.PERSISTENCE ? this.settings.FILTER_TAG_OPERATOR : this.tagOperator);
     }
 
-    private getStartupTierFilterValues(): string[] {
-        return this.filterValuesByAvailable(this.settings.PERSISTENCE ? this.settings.FILTER_STARTUP_TIER_VALUES : this.startupTiers, [...STARTUP_TIERS], "");
+    /** The tiers the list is filtered to. None while staged startup is off (the filter isn't shown then either). */
+    private getStartupTierFilterValues(): StartupTier[] {
+        if (!this.settings.STAGED_STARTUP) return [];
+        return this.filterValuesByAvailable(this.settings.PERSISTENCE ? this.settings.FILTER_STARTUP_TIER_VALUES : this.startupTiers, [...STARTUP_TIERS], "")
+            .filter(isStartupTier);
     }
 
     private getStartupTierFilterOperator(): FilterOperator {
@@ -2846,7 +2849,6 @@ export class ManagerModal extends Modal {
 
             // 启动阶段筛选标签
             for (const tier of currentStartupTiers) {
-                if (!isStartupTier(tier)) continue;
                 addChip(this.manager.translator.t(STARTUP_TIER_LABEL_KEYS[tier]), this.getStartupTierFilterOperator(), () => {
                     this.setStartupTierFilterValues(this.getStartupTierFilterValues().filter((value) => value !== tier));
                 });

@@ -476,8 +476,10 @@ export default class Manager extends Plugin {
                 ? await workspace.readWorkspaceFile()
                 : JSON.parse(await this.app.vault.adapter.read(`${this.app.vault.configDir}/${Platform.isMobile ? "workspace-mobile.json" : "workspace.json"}`)) as Record<string, unknown>;
             const hiddenItems = (layout?.["left-ribbon"] as { hiddenItems?: unknown } | undefined)?.hiddenItems;
-            return hiddenItems && typeof hiddenItems === "object" ? hiddenItems as Record<string, boolean> : null;
-        } catch {
+            return hiddenItems && typeof hiddenItems === "object" && !Array.isArray(hiddenItems) ? hiddenItems as Record<string, boolean> : null;
+        } catch (error) {
+            // Without it, late-started plugins' hidden ribbon icons may come back; nothing else breaks.
+            console.warn("[BPM] Couldn't read the saved ribbon layout", error);
             return null;
         }
     }
