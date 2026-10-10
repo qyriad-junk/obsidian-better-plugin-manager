@@ -591,6 +591,8 @@ export class PluginStartup {
 			ok = await this.load(id, false);
 		} else if (this.isWanted(id)) {
 			ok = await this.load(id, isNew);
+			// Like setWanted: if Obsidian won't run a new install, don't record it as wanted.
+			if (!ok && isNew) record.enabled = false;
 		}
 		await this.syncNativeStartupList();
 		await this.host.saveSettings();

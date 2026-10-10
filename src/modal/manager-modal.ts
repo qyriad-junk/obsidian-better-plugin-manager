@@ -1624,13 +1624,17 @@ export class ManagerModal extends Modal {
 
     private async singleStartPlugin(plugin: PluginManifest) {
         new Notice(this.manager.translator.t("管理器_单次启动中_提示"));
-        await this.manager.pluginStartup.startOnce(plugin.id);
+        if (!await this.manager.pluginStartup.startOnce(plugin.id)) {
+            new Notice(this.manager.translator.t("启动_错误_拒绝加载", { name: plugin.name || plugin.id }));
+        }
         this.refreshPluginCard(plugin.id, { allowReload: true });
     }
 
     private async restartPlugin(plugin: PluginManifest) {
         new Notice(this.manager.translator.t("管理器_重启中_提示"));
-        await this.manager.pluginStartup.restart(plugin.id);
+        if (!await this.manager.pluginStartup.restart(plugin.id)) {
+            new Notice(this.manager.translator.t("启动_错误_拒绝加载", { name: plugin.name || plugin.id }));
+        }
         this.refreshPluginCard(plugin.id, { allowReload: true });
     }
 
@@ -2026,14 +2030,16 @@ export class ManagerModal extends Modal {
         let processed = 0;
         const states: Record<string, boolean> = {};
         for (const plugin of plugins) states[plugin.id] = targetEnabled;
-        await this.manager.pluginStartup.setWantedMany(states, { userInitiated: true }, (pluginId) => {
+        const applied = await this.manager.pluginStartup.setWantedMany(states, { userInitiated: true }, (pluginId) => {
             processed++;
             progress.update(processed, plugins.length, pluginId);
         });
         progress.hide();
         Commands(this.app, this.manager);
         await this.reloadShowData();
-        new Notice(t("批量编辑_已更新状态", { count: plugins.length }));
+        const refused = plugins.filter((plugin) => !applied.includes(plugin.id));
+        new Notice(t("批量编辑_已更新状态", { count: applied.length })
+            + (refused.length > 0 ? `\n${t("启动_错误_部分失败", { count: refused.length, names: refused.map((plugin) => plugin.name || plugin.id).join(", ") })}` : ""));
     }
 
     private showInlineProgress(text: string, subText?: string) {

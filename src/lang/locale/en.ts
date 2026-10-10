@@ -601,6 +601,8 @@ export default {
     安装_错误_主题manifest缺少名称: 'Theme manifest is missing the name field.',
     安装_错误_名称不安全: 'Refusing to install: the manifest id or name "{name}" isn\'t usable as a folder name (it contains / \\ or :, or is . or ..).',
     安装_错误_无法启用: '"{name}" was installed, but Obsidian refused to enable it (it may need a newer Obsidian, or be desktop-only).',
+    启动_错误_拒绝加载: '"{name}" couldn\'t be started: Obsidian refused to load it (it may be desktop-only, need a newer Obsidian, or have failed while loading; see the developer console).',
+    启动_错误_部分失败: 'Obsidian refused to start {count} of them: {names}',
     安装_主题成功_提示: 'Installed/updated theme: {name}',
     安装_主题错误_通用: 'Theme install failed. Check the repository, version, or network.',
     安装_版本更新信息_标题: 'Release notes',

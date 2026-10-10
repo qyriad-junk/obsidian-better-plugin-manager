@@ -1,5 +1,6 @@
 import ShareMyPlugin from "main";
 import { Notice, ObsidianProtocolData, debounce, requestUrl } from "obsidian";
+import type { PluginManifest } from "obsidian";
 import { resolveGithubUrl } from "./github-url";
 
 // 导出一个全局的 communityPlugins 变量，可在其他模块中使用
@@ -95,6 +96,8 @@ export default class Agreement {
 
         // 标记是否需要安装插件
         let installFlag = false;
+        // Obsidian refused to load what was just installed (already reported; don't try again below).
+        let refused = false;
         // 获取插件的仓库地址，如果提供了 github 参数，则使用该参数，否则从社区插件列表中获取
         const repo = github !== "" ? github : this.communityPlugins[id]?.repo;
         console.log(repo)
@@ -120,18 +123,23 @@ export default class Agreement {
             // 从 GitHub 仓库获取插件的 manifest.json 文件
             const manifestUrl = `https://raw.githubusercontent.com/${repo}/HEAD/manifest.json`;
             const manifestRes = await requestUrl(resolveGithubUrl(this.plugin, manifestUrl));
-            const manifest = manifestRes.json;
+            const manifest = manifestRes.json as PluginManifest;
             // 如果版本为 "latest" 或空字符串，则使用 manifest 中的版本
             if (version.toLowerCase() === "latest" || version === "") version = manifest.version;
             // 调用插件注册表的 installPlugin 方法安装插件
             await pluginRegistry.installPlugin(repo, version, manifest);
             // A fresh install is turned on only if the link asked for it; an update keeps its on/off state.
-            await this.plugin.pluginStartup.applyInstalledFiles(id, { wantedIfNew: enable });
+            if (!await this.plugin.pluginStartup.applyInstalledFiles(id, { wantedIfNew: enable })) {
+                refused = true;
+                new Notice(this.plugin.translator.t("安装_错误_无法启用", { name: manifest.name || id }));
+            }
         }
 
         // enable=true also turns on an already-installed plugin. (enable=false never turns anything off.)
-        if (enable && !this.plugin.pluginStartup.isWanted(id)) {
-            await this.plugin.pluginStartup.setWanted(id, true, { userInitiated: true });
+        if (enable && !refused && !this.plugin.pluginStartup.isWanted(id)) {
+            if (!await this.plugin.pluginStartup.setWanted(id, true, { userInitiated: true })) {
+                new Notice(this.plugin.translator.t("启动_错误_拒绝加载", { name: this.plugin.appPlugins.manifests[id]?.name || id }));
+            }
         }
     }
 

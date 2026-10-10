@@ -399,6 +399,17 @@ describe("installs and updates", () => {
 		expect(vault.plugins.plugins.new.userEnabled).toBe(true);
 	});
 
+	test("a fresh install Obsidian refuses to load isn't recorded as wanted (like setWanted)", async () => {
+		const vault = new Vault([]);
+		vault.plugins.communityPluginsOnDisk = [BPM];
+		await vault.launch();
+		vault.plugins.install("desktop-only");
+		vault.plugins.refused.add("desktop-only");
+		expect(await vault.startup.applyInstalledFiles("desktop-only")).toBe(false);
+		expect(vault.startup.isWanted("desktop-only")).toBe(false);
+		expect(vault.native()).toEqual([BPM]);
+	});
+
 	test("updating a disabled plugin keeps it disabled", async () => {
 		const vault = new Vault(["a"]);
 		vault.plugins.communityPluginsOnDisk = [BPM];

@@ -180,6 +180,8 @@ class ManagerCommandService {
                 new Notice(targetEnabled
                     ? this.t("command_notice_plugin_enabled", { name: this.getPluginName(pluginId) })
                     : this.t("command_notice_plugin_disabled", { name: this.getPluginName(pluginId) }));
+            } else if (this.isPluginEnabled(pluginId) !== targetEnabled) {
+                new Notice(this.t("启动_错误_拒绝加载", { name: this.getPluginName(pluginId) }));
             }
         });
     }
@@ -420,7 +422,9 @@ class ManagerCommandService {
                 progress.hide();
             }
             this.refreshAfterStatusChange(changedIds);
-            new Notice(this.t("command_notice_bulk_done", { count: changedIds.length }));
+            const refused = Object.keys(toChange).filter((pluginId) => !changedIds.includes(pluginId));
+            new Notice(this.t("command_notice_bulk_done", { count: changedIds.length })
+                + (refused.length > 0 ? `\n${this.t("启动_错误_部分失败", { count: refused.length, names: refused.map((id) => this.getPluginName(id)).join(", ") })}` : ""));
         });
     }
 
@@ -428,7 +432,9 @@ class ManagerCommandService {
         if (!this.isActionablePlugin(pluginId) || this.manager.pluginStartup.isLoaded(pluginId)) return;
         await this.runLocked(`single:${pluginId}`, async () => {
             new Notice(this.manager.translator.t("管理器_单次启动中_提示"));
-            await this.manager.pluginStartup.startOnce(pluginId);
+            if (!await this.manager.pluginStartup.startOnce(pluginId)) {
+                new Notice(this.t("启动_错误_拒绝加载", { name: this.getPluginName(pluginId) }));
+            }
             this.refreshAfterStatusChange([pluginId]);
         });
     }
@@ -437,7 +443,9 @@ class ManagerCommandService {
         if (!this.isActionablePlugin(pluginId) || !this.manager.pluginStartup.isLoaded(pluginId)) return;
         await this.runLocked(`restart:${pluginId}`, async () => {
             new Notice(this.manager.translator.t("管理器_重启中_提示"));
-            await this.manager.pluginStartup.restart(pluginId);
+            if (!await this.manager.pluginStartup.restart(pluginId)) {
+                new Notice(this.t("启动_错误_拒绝加载", { name: this.getPluginName(pluginId) }));
+            }
             this.refreshAfterStatusChange([pluginId]);
         });
     }

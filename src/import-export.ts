@@ -1079,10 +1079,11 @@ export const applyManagerTransferPackage = async (
 			try {
 				await writePluginFileBundle(manager, plugin);
 				// Reads the new manifest; an already-installed plugin keeps its on/off state and is reloaded if running.
-				await manager.pluginStartup.applyInstalledFiles(plugin.id, { wantedIfNew });
+				const started = await manager.pluginStartup.applyInstalledFiles(plugin.id, { wantedIfNew });
 				installed = Boolean(manager.appPlugins.manifests[plugin.id]);
 				if (!installed) throw new Error("Plugin files were written, but Obsidian did not load the manifest.");
 				if (!wasInstalled) result.installedPlugins++;
+				if (!started) throw new Error("Plugin files were restored, but Obsidian refused to load the plugin.");
 			} catch (error) {
 				result.failedPlugins.push({
 					id: plugin.id,
@@ -1131,7 +1132,9 @@ export const applyManagerTransferPackage = async (
 
 		if (options.applyEnabledState && plugin.id !== manager.manifest.id) {
 			try {
-				await manager.pluginStartup.setWanted(plugin.id, Boolean(plugin.enabled));
+				const applied = await manager.pluginStartup.setWanted(plugin.id, Boolean(plugin.enabled));
+				// Not installed: already reported above. Otherwise false means Obsidian refused to load it.
+				if (!applied && manager.pluginStartup.isInstalled(plugin.id)) throw new Error("Obsidian refused to load the plugin.");
 			} catch (error) {
 				result.failedPlugins.push({
 					id: plugin.id,
@@ -1242,7 +1245,10 @@ export const applyManagerTransferPackage = async (
 			try {
 				// If the plugin is running, unload it while its data.json is replaced (so it can't save its old
 				// settings over the new ones) and load it again afterwards.
-				await manager.pluginStartup.whileUnloaded(config.id, () => writePluginConfigFile(manager, config));
+				const wasRunning = await manager.pluginStartup.whileUnloaded(config.id, () => writePluginConfigFile(manager, config));
+				if (wasRunning && !manager.pluginStartup.isLoaded(config.id)) {
+					throw new Error("The config was imported, but the plugin didn't start again afterwards.");
+				}
 				result.appliedPluginConfigs++;
 			} catch (error) {
 				result.failedPluginConfigs.push({
