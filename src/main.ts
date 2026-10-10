@@ -12,6 +12,7 @@ import { BetaSource, ManagerPlugin, BPM_IGNORE_TAG, EONDR_PLUGIN_TAG_ID } from '
 import { runMigrations } from './migrations';
 import { fetchReleaseVersions, installPluginFromGithub, installThemeFromGithub, ReleaseVersion, sanitizeRepo } from './github-install';
 import { PluginStartup, PluginStartupHost } from './plugin-startup';
+import { RibbonLayoutKeeper } from './ribbon-state';
 import { SystemRibbonManager } from './manager/system-ribbon-manager';
 import { RibbonItem } from './data/types';
 import { markSourceInstalledRelease, sourceHasUpdate as sourceHasConfiguredUpdate, syncSourceReleaseCheck } from './source-release';
@@ -82,6 +83,7 @@ export default class Manager extends Plugin {
     public systemRibbonManager?: SystemRibbonManager;
     /** Decides which community plugins run and how they start. See src/plugin-startup.ts. */
     public pluginStartup!: PluginStartup;
+    private ribbonLayoutKeeper?: RibbonLayoutKeeper;
     public updateStatus: Record<string, UpdateStatus> = {};
     private updateProgressNotice: Notice | null = null;
 
@@ -153,6 +155,11 @@ export default class Manager extends Plugin {
         // 初始化设置界面
         this.addSettingTab(new ManagerSettingTab(this.app, this));
         if (this.synchronizePlugins(this.getInstalledPluginManifests(), { save: false })) markSettingsDirty();
+        // Read before Obsidian loads (and later re-saves) the layout, which loses late-started plugins' ribbon state.
+        this.ribbonLayoutKeeper = new RibbonLayoutKeeper(
+            () => (this.app.workspace as WorkspaceWithRibbon).leftRibbon,
+            await this.readSavedRibbonLayout(),
+        );
         // Adopts native toggles, re-derives Obsidian's startup list, and (in delay mode) schedules delayed starts.
         this.pluginStartup = new PluginStartup(this.createPluginStartupHost());
         await this.pluginStartup.start();
@@ -443,6 +450,20 @@ export default class Manager extends Plugin {
         return Object.values(this.appPlugins.manifests).filter((manifest: PluginManifest) => manifest.id !== this.manifest.id);
     }
 
+    /** `left-ribbon.hiddenItems` from the workspace file Obsidian loads its layout from, or null. */
+    private async readSavedRibbonLayout(): Promise<Record<string, boolean> | null> {
+        try {
+            const workspace = this.app.workspace as unknown as { readWorkspaceFile?: () => Promise<Record<string, unknown>> };
+            const layout: Record<string, unknown> | null = workspace.readWorkspaceFile
+                ? await workspace.readWorkspaceFile()
+                : JSON.parse(await this.app.vault.adapter.read(`${this.app.vault.configDir}/${Platform.isMobile ? "workspace-mobile.json" : "workspace.json"}`)) as Record<string, unknown>;
+            const hiddenItems = (layout?.["left-ribbon"] as { hiddenItems?: unknown } | undefined)?.hiddenItems;
+            return hiddenItems && typeof hiddenItems === "object" ? hiddenItems as Record<string, boolean> : null;
+        } catch {
+            return null;
+        }
+    }
+
     private createPluginStartupHost(): PluginStartupHost {
         // eslint-disable-next-line @typescript-eslint/no-this-alias
         const manager = this;
@@ -458,6 +479,9 @@ export default class Manager extends Plugin {
                 const ref = vault.on("raw", callback);
                 this.registerEvent(ref);
                 return () => this.app.vault.offref(ref);
+            },
+            syncLateStartLayout: () => {
+                if (this.app.workspace.layoutReady) this.ribbonLayoutKeeper?.sync();
             },
             createRecord: (id, wanted) => {
                 const record = this.createPluginRecord(id, wanted);

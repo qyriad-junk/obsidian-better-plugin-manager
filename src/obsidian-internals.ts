@@ -83,6 +83,10 @@ export type RibbonNativeItem = {
 
 export type LeftRibbonLike = {
     items?: Array<RibbonNativeItem | null | undefined>;
+    /** `hiddenItems` key order is the ribbon order. */
+    serialize(): { hiddenItems: Record<string, boolean> };
+    /** Applies hidden flags and order to the items that exist right now; others are ignored. */
+    load(layout: { hiddenItems: Record<string, boolean> }): void;
 };
 
 export type WorkspaceWithRibbon = Workspace & {

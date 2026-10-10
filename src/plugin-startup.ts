@@ -46,6 +46,12 @@ export interface PluginStartupHost {
 	readonly pluginFolder: string;
 	/** Subscribe to the vault's "raw" events (every file change seen on disk, config dir included). Returns an unsubscribe. */
 	onVaultRaw(callback: (path: string) => void): () => void;
+	/**
+	 * Re-apply saved workspace layout state that a plugin started after the layout loaded would otherwise lose (its
+	 * ribbon icons' hidden flags and order; see src/ribbon-state.ts). Called before and after every load BPM causes;
+	 * does nothing until the layout is ready.
+	 */
+	syncLateStartLayout(): void;
 }
 
 export interface SetWantedOptions {
@@ -205,8 +211,10 @@ export class PluginStartup {
 	/** Load a plugin, noting that BPM caused it. */
 	private async load(id: string, userInitiated: boolean): Promise<boolean> {
 		this.knownLoaded.add(id);
+		this.host.syncLateStartLayout();
 		const ok = await this.registry.enablePlugin(id, userInitiated);
 		if (!ok && !this.isLoaded(id)) this.knownLoaded.delete(id);
+		this.host.syncLateStartLayout();
 		return ok;
 	}
 

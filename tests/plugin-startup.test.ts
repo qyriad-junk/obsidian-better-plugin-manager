@@ -34,6 +34,7 @@ class Vault {
 			saveSettings: async () => { await this.startup?.reconcile(); this.saves++; },
 			pluginFolder: this.plugins.pluginFolder,
 			onVaultRaw: (callback) => this.plugins.onVaultRaw(callback),
+			syncLateStartLayout: () => {},
 			createRecord: (id, wanted) => {
 				const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: "", note: "" };
 				this.settings.Plugins.push(record);
