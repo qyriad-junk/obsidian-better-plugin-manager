@@ -12,9 +12,16 @@ class Vault {
 	plugins = new FakePluginManager();
 	settings = { DELAY: false, DELAYS: [{ id: "soon", name: "Soon", time: 0.5 }, { id: "later", name: "Later", time: 5 }], Plugins: [] as ManagerPlugin[] };
 	saves = 0;
+	layoutSyncs = 0;
 	startup!: PluginStartup;
+	private layoutReady = false;
+	private onReady: (() => void)[] = [];
 
-	constructor(ids: string[]) {
+	/** Delay profile given to records BPM creates. "" maps to the `native` tier, "soon" to `after-ready`. */
+	private newRecordDelay: string;
+
+	constructor(ids: string[], { newRecordDelay = "" } = {}) {
+		this.newRecordDelay = newRecordDelay;
 		this.plugins.install(BPM);
 		for (const id of ids) this.plugins.install(id);
 	}
@@ -34,20 +41,36 @@ class Vault {
 			saveSettings: async () => { await this.startup?.reconcile(); this.saves++; },
 			pluginFolder: this.plugins.pluginFolder,
 			onVaultRaw: (callback) => this.plugins.onVaultRaw(callback),
-			syncLateStartLayout: () => {},
+			syncLateStartLayout: () => { this.layoutSyncs++; },
+			onLayoutReady: (callback) => {
+				if (this.layoutReady) callback();
+				else this.onReady.push(callback);
+			},
+			log: () => {},
 			createRecord: (id, wanted) => {
-				const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: "", note: "" };
+				const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: this.newRecordDelay, note: "" };
 				this.settings.Plugins.push(record);
 				return record;
 			},
 		};
 	}
 
-	/** Launch Obsidian (reads community-plugins.json, starts what's listed), then BPM's onload. */
-	async launch(): Promise<void> {
+	/**
+	 * Launch Obsidian: read community-plugins.json and start what's listed (BPM's onload among them), then load the
+	 * workspace layout, unless `untilLayoutReady` is false (then call {@link finishLayout}).
+	 */
+	async launch({ untilLayoutReady = true } = {}): Promise<void> {
+		this.layoutReady = false;
+		this.onReady = [];
 		await this.plugins.startup();
 		this.startup = new PluginStartup(this.host());
 		await this.startup.start();
+		if (untilLayoutReady) this.finishLayout();
+	}
+
+	finishLayout(): void {
+		this.layoutReady = true;
+		for (const callback of this.onReady.splice(0)) callback();
 	}
 
 	native(): string[] {
@@ -103,29 +126,84 @@ describe("normal mode", () => {
 });
 
 describe("delay mode", () => {
-	test("Obsidian starts only BPM and ignored plugins; BPM starts the rest after their delays", async () => {
-		const vault = new Vault(["fast", "slow", "native", "off"]);
-		vault.plugins.communityPluginsOnDisk = [BPM, "fast", "slow", "native"];
+	test("Obsidian starts BPM, ignored and native-tier plugins; BPM starts the rest once the layout is ready", async () => {
+		const vault = new Vault(["soon", "later", "with-obsidian", "ignored", "off"]);
+		vault.plugins.communityPluginsOnDisk = [BPM, "soon", "later", "with-obsidian", "ignored"];
 		await vault.launch();
-		vault.record("fast").delay = "soon";
-		vault.record("slow").delay = "later";
-		await vault.startup.setIgnored("native", true);
+		vault.record("soon").delay = "soon";
+		vault.record("later").delay = "later";
+		await vault.startup.setIgnored("ignored", true);
 		await vault.startup.setDelayMode(true);
 
-		await vault.launch();
-		expect(vault.native()).toEqual([BPM, "native"].sort());
-		expect(vault.plugins.loaded()).toEqual([BPM, "native"].sort());
-		await advance(499);
-		expect(vault.plugins.loaded()).toEqual([BPM, "native"].sort());
-		await advance(1);
-		expect(vault.plugins.loaded()).toEqual([BPM, "fast", "native"].sort());
-		await advance(4500);
-		expect(vault.plugins.loaded()).toEqual([BPM, "fast", "native", "slow"].sort());
+		await vault.launch({ untilLayoutReady: false });
+		expect(vault.native()).toEqual([BPM, "ignored", "with-obsidian"].sort());
+		expect(vault.plugins.loaded()).toEqual([BPM, "ignored", "with-obsidian"].sort());
+		expect(vault.startup.pendingStarts()).toEqual(["soon", "later"]);
+		await advance(60_000); // no clock: nothing starts until the workspace is ready
+		expect(vault.plugins.loaded()).toEqual([BPM, "ignored", "with-obsidian"].sort());
+
+		vault.finishLayout();
+		await settle();
+		expect(vault.plugins.loaded()).toEqual([BPM, "ignored", "soon", "with-obsidian"].sort());
+		await advance(50); // background: when idle (no requestIdleCallback here, so a short timeout)
+		expect(vault.plugins.loaded()).toEqual([BPM, "ignored", "later", "soon", "with-obsidian"].sort());
 		expect(vault.plugins.loaded()).not.toContain("off");
 	});
 
+	test("one plugin at a time: after-ready in list order, then background, native-tier stragglers first", async () => {
+		const vault = new Vault(["bg1", "r1", "bg2", "r2", "n1"], { newRecordDelay: "soon" });
+		vault.settings.DELAY = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "bg1", "r1", "bg2", "r2", "n1"];
+		await vault.launch(); // adopted; all BPM-started from the next launch
+		vault.record("bg1").delay = "later";
+		vault.record("bg2").delay = "later";
+		vault.record("n1").delay = ""; // native tier, but (like right after upgrading BPM) not on the native list
+		await vault.startup.reconcile();
+		vault.plugins.communityPluginsOnDisk = [BPM];
+		await vault.launch({ untilLayoutReady: false });
+		expect(vault.plugins.loaded()).toEqual([BPM]);
+		vault.plugins.log = [];
+
+		vault.finishLayout();
+		await vi.advanceTimersToNextTimerAsync();
+		expect(vault.plugins.log).toEqual(["load:n1"]); // a yield to the UI before each start
+		await advance(1000);
+		expect(vault.plugins.log.filter((entry) => entry.startsWith("load:"))).toEqual(
+			["load:n1", "load:r1", "load:r2", "load:bg1", "load:bg2"]);
+	});
+
+	test("a pending plugin's tier is read when its turn comes", async () => {
+		const vault = new Vault(["a", "b"], { newRecordDelay: "soon" });
+		vault.settings.DELAY = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a", "b"];
+		await vault.launch();
+		vault.record("a").delay = "later";
+		await vault.launch({ untilLayoutReady: false });
+		expect(vault.startup.pendingStarts()).toEqual(["b", "a"]);
+		vault.record("a").delay = "soon";
+		vault.record("b").delay = "later";
+		vault.finishLayout();
+		await settle();
+		await settle();
+		expect(vault.plugins.loaded()).toEqual([BPM, "a"].sort());
+	});
+
+	test("late starts re-apply the saved workspace layout (ribbon) around each load", async () => {
+		const vault = new Vault(["a"], { newRecordDelay: "soon" });
+		vault.settings.DELAY = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await vault.launch();
+		await vault.launch();
+		vault.layoutSyncs = 0;
+		await settle();
+		expect(vault.plugins.loaded()).toEqual([BPM, "a"].sort());
+		expect(vault.layoutSyncs).toBe(2);
+		await advance(2000); // and once more a little later, for icons added after onload
+		expect(vault.layoutSyncs).toBe(3);
+	});
+
 	test("delay starts aren't user-initiated (no onUserEnable)", async () => {
-		const vault = new Vault(["a"]);
+		const vault = new Vault(["a"], { newRecordDelay: "soon" });
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 		vault.settings.DELAY = true;
 		await vault.launch(); // a was on the native list: adopted, moved under BPM from the next launch
@@ -135,7 +213,7 @@ describe("delay mode", () => {
 	});
 
 	test("switching delay mode never reloads anything", async () => {
-		const vault = new Vault(["a", "b"]);
+		const vault = new Vault(["a", "b"], { newRecordDelay: "soon" });
 		vault.plugins.communityPluginsOnDisk = [BPM, "a", "b"];
 		await vault.launch();
 		const logBefore = vault.plugins.log.filter((entry) => entry !== "save").length;
@@ -163,7 +241,7 @@ describe("delay mode", () => {
 	});
 
 	test("a plugin found on the native list at launch is taken over silently", async () => {
-		const vault = new Vault(["a", "b"]);
+		const vault = new Vault(["a", "b"], { newRecordDelay: "soon" });
 		vault.settings.DELAY = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"]; // e.g. enabled natively while BPM was disabled
 		await vault.launch();
@@ -207,7 +285,7 @@ describe("native toggles (Obsidian's own settings / CLI)", () => {
 	test("in delay mode, switching off a BPM-started plugin natively (it's only unloaded) is adopted", async () => {
 		// Obsidian's toggle shows running state, so a BPM-started plugin shows "on"; turning it off there calls
 		// disablePluginAndSave, which can't change the native list (the plugin isn't on it) and just unloads it.
-		const vault = new Vault(["a"]);
+		const vault = new Vault(["a"], { newRecordDelay: "soon" });
 		vault.settings.DELAY = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
 		await vault.launch();
@@ -224,7 +302,7 @@ describe("native toggles (Obsidian's own settings / CLI)", () => {
 	});
 
 	test("a native enable in delay mode is handed back to BPM without stopping the plugin", async () => {
-		const vault = new Vault(["a"]);
+		const vault = new Vault(["a"], { newRecordDelay: "soon" });
 		vault.settings.DELAY = true;
 		vault.plugins.communityPluginsOnDisk = [BPM];
 		await vault.launch();
@@ -280,7 +358,7 @@ describe("bpm-ignore", () => {
 	});
 
 	test("adding or removing the tag anywhere is picked up by reconcile()", async () => {
-		const vault = new Vault(["x"]);
+		const vault = new Vault(["x"], { newRecordDelay: "soon" });
 		vault.settings.DELAY = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "x"];
 		await vault.launch(); // x adopted as wanted, moved under BPM
@@ -297,10 +375,10 @@ describe("bpm-ignore", () => {
 	});
 
 	test("un-ignoring takes the plugin back under BPM with its native state", async () => {
-		const vault = new Vault(["x"]);
+		const vault = new Vault(["x"], { newRecordDelay: "soon" });
 		vault.settings.DELAY = true;
 		vault.plugins.communityPluginsOnDisk = [BPM, "x"];
-		vault.settings.Plugins.push({ id: "x", name: "x", desc: "", group: "", tags: [BPM_IGNORE_TAG], enabled: false, delay: "", note: "" });
+		vault.settings.Plugins.push({ id: "x", name: "x", desc: "", group: "", tags: [BPM_IGNORE_TAG], enabled: false, delay: "soon", note: "" });
 		await vault.launch();
 		await vault.startup.setIgnored("x", false);
 		expect(vault.startup.isWanted("x")).toBe(true);
@@ -342,7 +420,7 @@ describe("installs and updates", () => {
 		const vault = new Vault(["a"]);
 		vault.settings.DELAY = true;
 		vault.plugins.communityPluginsOnDisk = [BPM];
-		vault.settings.Plugins.push({ id: "a", name: "a", desc: "", group: "", tags: [], enabled: true, delay: "", note: "" });
+		vault.settings.Plugins.push({ id: "a", name: "a", desc: "", group: "", tags: [], enabled: true, delay: "soon", note: "" });
 		await vault.launch();
 		await settle();
 		await vault.startup.applyInstalledFiles("a");

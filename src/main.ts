@@ -465,7 +465,7 @@ export default class Manager extends Plugin {
     }
 
     private createPluginStartupHost(): PluginStartupHost {
-        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        // eslint-disable-next-line @typescript-eslint/no-this-alias -- the settings getter must read the live object
         const manager = this;
         return {
             selfId: this.manifest.id,
@@ -479,6 +479,10 @@ export default class Manager extends Plugin {
                 const ref = vault.on("raw", callback);
                 this.registerEvent(ref);
                 return () => this.app.vault.offref(ref);
+            },
+            onLayoutReady: (callback) => this.app.workspace.onLayoutReady(callback),
+            log: (message) => {
+                if (this.settings.DEBUG) console.debug(`[BPM] ${message}`);
             },
             syncLateStartLayout: () => {
                 if (this.app.workspace.layoutReady) this.ribbonLayoutKeeper?.sync();

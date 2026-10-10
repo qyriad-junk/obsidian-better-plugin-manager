@@ -2,6 +2,8 @@ import type { EventRef } from "obsidian";
 import { BPM_IGNORE_TAG } from "./data/types";
 import type { Delay, ManagerPlugin } from "./data/types";
 import type { ObsidianPluginRegistry } from "./obsidian-internals";
+import { STARTUP_TIERS, tierForLegacyDelay } from "./startup-tiers";
+import type { StartupTier } from "./startup-tiers";
 
 /**
  * The one place that decides which community plugins run, and how they get started.
@@ -12,7 +14,8 @@ import type { ObsidianPluginRegistry } from "./obsidian-internals";
  *   (`ManagerPlugin.enabled`), in delay mode and outside it alike.
  * - **native startup list**: what Obsidian itself loads at launch, i.e. `app.plugins.enabledPlugins`, persisted to
  *   community-plugins.json by `saveConfig()`. BPM *derives* it: BPM itself, `bpm-ignore` plugins as the user left
- *   them, and, outside delay mode, every wanted plugin. In delay mode BPM starts wanted plugins itself instead.
+ *   them, and every wanted plugin, except, in staged-startup ("delay") mode, those whose {@link StartupTier} says
+ *   BPM starts them after the workspace is ready.
  * - **loaded**: running right now (`app.plugins.plugins[id]`).
  *
  * `bpm-ignore` means "Obsidian's native startup list is authoritative for this plugin": BPM mirrors its native state
@@ -44,6 +47,10 @@ export interface PluginStartupHost {
 	createRecord(id: string, wanted: boolean): ManagerPlugin;
 	/** `<configDir>/plugins`, Obsidian's plugin folder. */
 	readonly pluginFolder: string;
+	/** Run `callback` once the workspace layout is ready (right away if it already is). */
+	onLayoutReady(callback: () => void): void;
+	/** Debug logging (only shown when BPM's debug setting is on). */
+	log(message: string): void;
 	/** Subscribe to the vault's "raw" events (every file change seen on disk, config dir included). Returns an unsubscribe. */
 	onVaultRaw(callback: (path: string) => void): () => void;
 	/**
@@ -63,8 +70,6 @@ export interface SetWantedOptions {
 	userInitiated?: boolean;
 }
 
-type Timer = number;
-
 export class PluginStartup {
 	private readonly host: PluginStartupHost;
 	/** The native startup list as BPM last left it, to tell the user's native toggles apart from BPM's own writes. */
@@ -75,7 +80,10 @@ export class PluginStartup {
 	private knownLoaded = new Set<string>();
 	private changeRef: EventRef | null = null;
 	private stopWatchingRaw: (() => void) | null = null;
-	private delayedStarts = new Map<string, Timer>();
+	/** Plugins BPM will start once the workspace is ready (staged startup), and hasn't yet. */
+	private pending = new Set<string>();
+	/** Bumped by stop(), so a staged startup still in progress knows to give up. */
+	private generation = 0;
 
 	constructor(host: PluginStartupHost) {
 		this.host = host;
@@ -117,16 +125,15 @@ export class PluginStartup {
 		return Boolean(this.registry.plugins?.[id]);
 	}
 
-	/** Whether BPM (rather than Obsidian) will start this plugin at the next launch. */
-	isStartedByBpm(id: string): boolean {
-		return this.host.settings.DELAY && this.isManaged(id);
+	/** When this plugin starts in staged-startup mode. */
+	getStartupTier(id: string): StartupTier {
+		const delayId = this.getRecord(id)?.delay;
+		return tierForLegacyDelay(this.host.settings.DELAYS.find((delay) => delay.id === delayId)?.time);
 	}
 
-	/** Seconds BPM waits before starting this plugin at launch (delay mode only). */
-	getStartDelaySeconds(id: string): number {
-		const delayId = this.getRecord(id)?.delay;
-		const time = this.host.settings.DELAYS.find((delay) => delay.id === delayId)?.time;
-		return typeof time === "number" && Number.isFinite(time) && time > 0 ? time : 0;
+	/** Whether BPM (rather than Obsidian) will start this plugin at the next launch. */
+	isStartedByBpm(id: string): boolean {
+		return this.host.settings.DELAY && this.isManaged(id) && this.getStartupTier(id) !== "native";
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -136,8 +143,7 @@ export class PluginStartup {
 		if (id === this.host.selfId) return this.registry.enabledPlugins.has(id);
 		// Ignored plugins stay exactly as the user left them natively.
 		if (this.isIgnored(id)) return this.registry.enabledPlugins.has(id);
-		if (this.host.settings.DELAY) return false;
-		return this.isInstalled(id) && this.isWanted(id);
+		return this.isInstalled(id) && this.isWanted(id) && !this.isStartedByBpm(id);
 	}
 
 	/**
@@ -291,9 +297,10 @@ export class PluginStartup {
 	 *
 	 * 1. Adopt the native startup list Obsidian just launched with. Any BPM-managed plugin on it was enabled natively
 	 *    while BPM wasn't watching; outside delay mode, a managed plugin *missing* from it was disabled natively.
+	 *    (In delay mode a missing plugin is normal: BPM starts it.)
 	 * 2. Re-derive the native startup list (in delay mode this moves natively-enabled plugins under BPM's control
-	 *    from the next launch on).
-	 * 3. In delay mode, schedule the wanted plugins that Obsidian didn't start.
+	 *    from the next launch on, unless their tier is `native`).
+	 * 3. In delay mode, start the wanted plugins that Obsidian didn't, once the workspace is ready.
 	 * 4. Watch for native toggles from now on.
 	 */
 	async start(): Promise<void> {
@@ -311,7 +318,13 @@ export class PluginStartup {
 		await this.syncNativeStartupList();
 		if (recordsChanged) await this.host.saveSettings();
 
-		if (this.host.settings.DELAY) this.scheduleDelayedStarts();
+		if (this.host.settings.DELAY) {
+			for (const id of Object.keys(this.registry.manifests)) {
+				if (this.isManaged(id) && this.isWanted(id) && !this.isLoaded(id)) this.pending.add(id);
+			}
+			const generation = this.generation;
+			this.host.onLayoutReady(() => void this.runStagedStartup(generation));
+		}
 
 		this.stopWatchingRaw = this.host.onVaultRaw((path) => this.forwardConfigFileChange(path));
 
@@ -336,43 +349,62 @@ export class PluginStartup {
 		plugin?.onConfigFileChange?.();
 	}
 
-	private scheduleDelayedStarts(): void {
-		for (const id of Object.keys(this.registry.manifests)) {
-			if (!this.isManaged(id) || !this.isWanted(id) || this.isLoaded(id)) continue;
-			this.scheduleStart(id, this.getStartDelaySeconds(id));
+	/**
+	 * Staged startup, once the workspace is ready: start every pending plugin, one at a time, in tier order and BPM's
+	 * list order within a tier. Plugins of the `native` tier that Obsidian didn't start (they were just moved to that
+	 * tier, or were on no list at all) go first. `after-ready` plugins get a yield to the UI between them;
+	 * `background` plugins each wait for Obsidian to be idle.
+	 *
+	 * The tier is read when its turn comes, so changing a pending plugin's tier before then still counts.
+	 */
+	private async runStagedStartup(generation: number): Promise<void> {
+		const readyAt = performance.now();
+		const stillRunning = () => generation === this.generation;
+		let startedAny = false;
+		const phases: { tiers: StartupTier[]; before: () => Promise<void> }[] = [
+			{ tiers: ["native", "after-ready"], before: yieldToUi },
+			{ tiers: ["background"], before: waitForIdle },
+		];
+		for (const phase of phases) {
+			for (const id of this.pendingStarts().filter((id) => phase.tiers.includes(this.getStartupTier(id)))) {
+				await phase.before();
+				if (!stillRunning()) return;
+				if (!this.pending.delete(id) || !this.isWanted(id) || this.isLoaded(id)) continue;
+				const startedAt = performance.now();
+				const ok = await this.load(id, false);
+				const finishedAt = performance.now();
+				startedAny = true;
+				this.host.log(`${ok ? "started" : "couldn't start"} ${id} (${this.getStartupTier(id)}) `
+					+ `${Math.round(startedAt - readyAt)} ms after layout-ready; onload took ${Math.round(finishedAt - startedAt)} ms`);
+			}
 		}
-	}
-
-	private scheduleStart(id: string, delaySeconds: number): void {
-		this.cancelScheduledStart(id);
-		const timer = window.setTimeout(() => {
-			this.delayedStarts.delete(id);
-			if (this.isWanted(id) && !this.isLoaded(id)) void this.load(id, false);
-		}, delaySeconds * 1000);
-		this.delayedStarts.set(id, timer);
+		// Some plugins add their ribbon icons a little after onload (e.g. from onLayoutReady): catch those too.
+		if (startedAny) window.setTimeout(() => { if (stillRunning()) this.host.syncLateStartLayout(); }, 2000);
 	}
 
 	private cancelScheduledStart(id: string): void {
-		const timer = this.delayedStarts.get(id);
-		if (timer !== undefined) window.clearTimeout(timer);
-		this.delayedStarts.delete(id);
+		this.pending.delete(id);
 	}
 
-	/** Ids BPM has scheduled to start but hasn't started yet. */
+	/** Plugins BPM will start once the workspace is ready but hasn't yet, in the order it will start them. */
 	pendingStarts(): string[] {
-		return Array.from(this.delayedStarts.keys());
+		const listOrder = new Map(this.host.settings.Plugins.map((record, index) => [record.id, index]));
+		const tierOrder = (id: string) => STARTUP_TIERS.indexOf(this.getStartupTier(id));
+		return Array.from(this.pending).sort((a, b) => tierOrder(a) - tierOrder(b)
+			|| (listOrder.get(a) ?? Infinity) - (listOrder.get(b) ?? Infinity));
 	}
 
 	/**
 	 * Called from BPM's onunload. Obsidian never unloads plugins on quit, so this only runs when BPM itself is
 	 * disabled, reloaded or updated. Hand every wanted plugin back to Obsidian's native startup list (and start any
-	 * still waiting on a delay), so they keep working without BPM. If BPM comes back, its onload takes them over again.
+	 * still waiting for their turn), so they keep working without BPM. If BPM comes back, its onload takes them over again.
 	 */
 	stop(): void {
 		if (this.changeRef) this.registry.offref(this.changeRef);
 		this.changeRef = null;
 		this.stopWatchingRaw?.();
 		this.stopWatchingRaw = null;
+		this.generation++;
 		const pending = this.pendingStarts();
 		for (const id of pending) this.cancelScheduledStart(id);
 
@@ -460,8 +492,8 @@ export class PluginStartup {
 	}
 
 	/**
-	 * Switch delay mode. Only the native startup list changes (it takes effect at the next launch); nothing is
-	 * unloaded or reloaded. Turning delay mode off starts anything still waiting on its delay right away.
+	 * Switch delay (staged startup) mode. Only the native startup list changes (it takes effect at the next launch);
+	 * nothing is unloaded or reloaded. Turning it off starts anything still waiting for its turn right away.
 	 */
 	async setDelayMode(enabled: boolean): Promise<void> {
 		this.host.settings.DELAY = enabled;
@@ -514,4 +546,17 @@ export class PluginStartup {
 		await this.host.saveSettings();
 		return ok;
 	}
+}
+
+/** Let Obsidian handle input and paint before the next plugin starts. */
+function yieldToUi(): Promise<void> {
+	return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
+/** Wait until Obsidian is idle (or a second has passed, so a busy app still gets there). */
+function waitForIdle(): Promise<void> {
+	return new Promise((resolve) => {
+		if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(() => resolve(), { timeout: 1000 });
+		else window.setTimeout(resolve, 50);
+	});
 }

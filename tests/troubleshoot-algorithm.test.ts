@@ -33,6 +33,8 @@ async function setup(pluginCount: number, delayMode: boolean) {
 		pluginFolder: plugins.pluginFolder,
 		onVaultRaw: (callback) => plugins.onVaultRaw(callback),
 		syncLateStartLayout: () => {},
+		onLayoutReady: (callback) => callback(),
+		log: () => {},
 		createRecord: (id, wanted) => {
 			const record: ManagerPlugin = { id, name: id, desc: "", group: "", tags: [], enabled: wanted, delay: "", note: "" };
 			settings.Plugins.push(record);
