@@ -9,8 +9,8 @@ import Agreement from 'src/agreement';
 import { RepoResolver, ensureBpmTagExists, BPM_TAG_ID } from './repo-resolver';
 import { Notice, Platform, requestUrl } from 'obsidian';
 import { BetaSource, ManagerPlugin, BPM_IGNORE_TAG, EONDR_PLUGIN_TAG_ID } from './data/types';
-import { migrateDelaysToStartupTiers, runMigrations } from './migrations';
-import { DEFAULT_STARTUP_TIER } from './startup-tiers';
+import { DelaySettingsConversion, migrateDelaysToStartupTiers, runMigrations } from './migrations';
+import { DEFAULT_STARTUP_TIER, normalizeStartupTiers } from './startup-tiers';
 import { fetchReleaseVersions, installPluginFromGithub, installThemeFromGithub, ReleaseVersion, sanitizeRepo } from './github-install';
 import { PluginStartup, PluginStartupHost } from './plugin-startup';
 import { RibbonLayoutKeeper } from './ribbon-state';
@@ -99,8 +99,8 @@ export default class Manager extends Plugin {
         this.appWorkspace = this.app.workspace;
 
         console.log(`%c ${this.manifest.name} %c v${this.manifest.version} `, `padding: 2px; border-radius: 2px 0 0 2px; color: #fff; background: #5B5B5B;`, `padding: 2px; border-radius: 0 2px 2px 0; color: #fff; background: #409EFF;`);
-        await this.loadSettings();
-        const delaySettingsBackup = await migrateDelaysToStartupTiers(this);
+        const delaySettingsConversion = await this.loadSettings();
+        if (delaySettingsConversion?.status === "converted") await this.saveData(this.settings);
         let settingsDirty = false;
         const markSettingsDirty = () => {
             settingsDirty = true;
@@ -115,7 +115,11 @@ export default class Manager extends Plugin {
         }
         // 初始化语言系统
         this.translator = new Translator(this);
-        if (delaySettingsBackup) new Notice(this.translator.t("启动阶段_迁移_通知", { path: delaySettingsBackup }), 0);
+        if (delaySettingsConversion?.status === "converted") {
+            new Notice(this.translator.t("启动阶段_迁移_通知", { path: delaySettingsConversion.backupPath }), 0);
+        } else if (delaySettingsConversion?.status === "backup-failed") {
+            new Notice(this.translator.t("启动阶段_迁移失败_通知", { error: String(delaySettingsConversion.error) }), 0);
+        }
         let builtinTagsChanged = false;
         const tagCountBeforeBpmEnsure = this.settings.TAGS.length;
         ensureBpmTagExists(this);
@@ -442,7 +446,15 @@ export default class Manager extends Plugin {
         }
     }
 
-    public async loadSettings() { this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData()); }
+    /** Load data.json, converting old delay settings to startup tiers first (see migrateDelaysToStartupTiers). */
+    public async loadSettings(): Promise<DelaySettingsConversion | null> {
+        const loaded: unknown = await this.loadData();
+        const data = loaded && typeof loaded === "object" ? loaded as Record<string, unknown> : {};
+        const conversion = await migrateDelaysToStartupTiers(this, data);
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+        normalizeStartupTiers(this.settings.Plugins);
+        return conversion;
+    }
     public async saveSettings() {
         // Tags (bpm-ignore) and records are edited in many places; keep Obsidian's startup list derived from them.
         if (this.pluginStartup) await this.pluginStartup.reconcile();

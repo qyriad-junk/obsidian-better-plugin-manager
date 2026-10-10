@@ -9,8 +9,8 @@ import {
 	Tag,
 	Type,
 } from "./data/types";
-import { DEFAULT_STARTUP_TIER, isStartupTier } from "./startup-tiers";
-import type { LegacyDelayPreset, StartupTier } from "./startup-tiers";
+import { DEFAULT_STARTUP_TIER, isStartupTier, tierForLegacyDelayPreset } from "./startup-tiers";
+import type { LegacyDelayPreset } from "./startup-tiers";
 import { installPluginFromGithub, installThemeFromGithub, sanitizeRepo } from "./github-install";
 import { getSafePathSegment } from "./path-safety";
 
@@ -64,7 +64,10 @@ export interface ManagerTransferPlugin {
 	enabled?: boolean;
 	group?: string;
 	tags?: string[];
-	startupTier?: StartupTier;
+	/** Checked on import (packages are untrusted input). */
+	startupTier?: string;
+	/** Before startup tiers: an id from `data.delays`. BPM's exporter never wrote it, but hand-made packages may. */
+	delay?: string;
 	note?: string;
 	customDescription?: string;
 	installedViaBpm?: boolean;
@@ -169,7 +172,7 @@ export interface ManagerTransferPackage {
 		pluginConfigs?: ManagerTransferPluginConfig[];
 		groups: Type[];
 		tags: Tag[];
-		/** Delay presets; only in packages from before startup tiers, and not imported. */
+		/** Delay presets; only in packages from before startup tiers. Used to read a plugin's legacy `delay`. */
 		delays?: LegacyDelayPreset[];
 		repoMap: Record<string, string>;
 		bpmInstalled: string[];
@@ -933,7 +936,8 @@ const upsertPluginRecord = (
 	manager: Manager,
 	plugin: ManagerTransferPlugin,
 	manifest?: PluginManifest,
-	applyMetadata = true
+	applyMetadata = true,
+	legacyDelayPresets?: LegacyDelayPreset[]
 ): ManagerPlugin => {
 	let record = manager.settings.Plugins.find((item) => item.id === plugin.id);
 	if (!record) {
@@ -957,6 +961,7 @@ const upsertPluginRecord = (
 		record.group = plugin.group || "";
 		record.tags = [...(plugin.tags || [])];
 		if (isStartupTier(plugin.startupTier)) record.startupTier = plugin.startupTier;
+		else if (typeof plugin.delay === "string") record.startupTier = tierForLegacyDelayPreset(plugin.delay, legacyDelayPresets);
 		record.note = plugin.note || "";
 	}
 	return record;
@@ -1119,7 +1124,7 @@ export const applyManagerTransferPackage = async (
 
 		if (repo && options.applySources) await manager.repoResolver.setRepo(plugin.id, repo);
 		const manifest = manager.appPlugins.manifests[plugin.id] as PluginManifest | undefined;
-		upsertPluginRecord(manager, plugin, manifest, options.applyPluginMetadata);
+		upsertPluginRecord(manager, plugin, manifest, options.applyPluginMetadata, transferPackage.data.delays);
 		if (options.applySources && plugin.installedViaBpm && !manager.settings.BPM_INSTALLED.includes(plugin.id)) {
 			manager.settings.BPM_INSTALLED.push(plugin.id);
 		}

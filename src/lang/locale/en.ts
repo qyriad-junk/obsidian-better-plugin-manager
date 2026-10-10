@@ -577,6 +577,7 @@ export default {
     启动阶段_就绪后: 'After ready',
     启动阶段_后台: 'Background',
     启动阶段_迁移_通知: 'Better Plugins Manager: per-plugin delays are now startup tiers (no delay → With Obsidian, under 5 s → After ready, 5 s or more → Background). Your previous settings were saved to {path}.',
+    启动阶段_迁移失败_通知: 'Better Plugins Manager couldn\'t back up its settings before converting per-plugin delays to startup tiers ({error}). It\'s using startup tiers for now and keeps the old delay settings in data.json, and will try again the next time Obsidian starts.',
     通用_全部_文本: 'All',
     通用_使用中_文本: 'In use',
     通用_系统_文本: 'System',

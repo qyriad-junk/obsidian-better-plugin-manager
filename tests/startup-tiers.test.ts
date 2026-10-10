@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { hasLegacyDelaySettings, migrateLegacyDelaySettings, tierForLegacyDelay } from "../src/startup-tiers";
+import { hasLegacyDelaySettings, migrateLegacyDelaySettings, normalizeStartupTiers, tierForLegacyDelay } from "../src/startup-tiers";
 
 describe("tierForLegacyDelay (the agreed mapping)", () => {
 	test.each([
@@ -23,7 +23,6 @@ describe("migrateLegacyDelaySettings", () => {
 		FILTER_DELAY: "quick",
 		FILTER_DELAY_VALUES: ["quick"],
 		FILTER_DELAY_OPERATOR: "contains",
-		STAGED_STARTUP: false, // from DEFAULT_SETTINGS, which loadSettings merges in first
 		PERSISTENCE: true,
 		Plugins: [
 			{ id: "none", enabled: true, delay: "" },
@@ -64,8 +63,21 @@ describe("migrateLegacyDelaySettings", () => {
 	});
 
 	test("delay mode off stays off", () => {
-		const settings: Record<string, unknown> = { ...legacy(), DELAY: false, STAGED_STARTUP: true };
+		const settings: Record<string, unknown> = { ...legacy(), DELAY: false };
 		migrateLegacyDelaySettings(settings);
 		expect(settings.STAGED_STARTUP).toBe(false);
+	});
+
+	test("a saved STAGED_STARTUP isn't overridden by DELAY", () => {
+		const settings: Record<string, unknown> = { ...legacy(), DELAY: false, STAGED_STARTUP: true };
+		migrateLegacyDelaySettings(settings);
+		expect(settings.STAGED_STARTUP).toBe(true);
+	});
+
+	test("normalizeStartupTiers gives records without a valid tier the default", () => {
+		const records: { startupTier?: unknown }[] = [{}, { startupTier: "bogus" }, { startupTier: "background" }];
+		expect(normalizeStartupTiers(records)).toBe(true);
+		expect(records.map((record) => record.startupTier)).toEqual(["native", "native", "background"]);
+		expect(normalizeStartupTiers(records)).toBe(false);
 	});
 });

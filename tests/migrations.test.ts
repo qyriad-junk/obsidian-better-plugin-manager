@@ -3,13 +3,13 @@ import type Manager from "main";
 import { DELAY_SETTINGS_BACKUP_FILE, migrateDelaysToStartupTiers } from "../src/migrations";
 
 const FOLDER = ".obsidian/plugins/better-plugins-manager";
+const BACKUP = `${FOLDER}/${DELAY_SETTINGS_BACKUP_FILE}`;
 
-/** Enough of Manager for the migration: settings, saveData, and an in-memory vault adapter. */
+/** Enough of Manager for the migration: its manifest and an in-memory vault adapter holding data.json. */
 function fakeManager(dataJson: string | null, { failWrites = false } = {}) {
 	const files = new Map<string, string>();
 	if (dataJson !== null) files.set(`${FOLDER}/data.json`, dataJson);
 	const manager = {
-		settings: dataJson ? { STAGED_STARTUP: false, ...JSON.parse(dataJson) } : {},
 		manifest: { id: "better-plugins-manager", dir: FOLDER },
 		app: {
 			vault: {
@@ -28,9 +28,8 @@ function fakeManager(dataJson: string | null, { failWrites = false } = {}) {
 				},
 			},
 		},
-		saveData: async (data: unknown) => { files.set(`${FOLDER}/data.json`, JSON.stringify(data)); },
 	};
-	return { manager: manager as unknown as Manager & { settings: Record<string, unknown> }, files };
+	return { manager: manager as unknown as Manager, files };
 }
 
 const LEGACY = JSON.stringify({
@@ -40,44 +39,67 @@ const LEGACY = JSON.stringify({
 }, null, "\t");
 
 describe("migrateDelaysToStartupTiers", () => {
-	test("backs up data.json byte for byte, then converts and saves", async () => {
+	test("backs up data.json byte for byte, then converts the loaded data", async () => {
 		const { manager, files } = fakeManager(LEGACY);
-		const backup = await migrateDelaysToStartupTiers(manager);
-		expect(backup).toBe(`${FOLDER}/${DELAY_SETTINGS_BACKUP_FILE}`);
-		expect(files.get(backup!)).toBe(LEGACY);
-		const saved = JSON.parse(files.get(`${FOLDER}/data.json`)!);
-		expect(saved.STAGED_STARTUP).toBe(true);
-		expect(saved.Plugins[0]).toEqual({ id: "a", enabled: true, startupTier: "after-ready" });
-		expect(saved).not.toHaveProperty("DELAYS");
+		const data = JSON.parse(LEGACY);
+		expect(await migrateDelaysToStartupTiers(manager, data)).toEqual({ status: "converted", backupPath: BACKUP });
+		expect(files.get(BACKUP)).toBe(LEGACY);
+		expect(data.STAGED_STARTUP).toBe(true);
+		expect(data.Plugins[0]).toEqual({ id: "a", enabled: true, startupTier: "after-ready" });
+		expect(data).not.toHaveProperty("DELAYS");
 	});
 
 	test("does nothing once converted", async () => {
 		const { manager, files } = fakeManager(LEGACY);
-		await migrateDelaysToStartupTiers(manager);
-		const after = new Map(files);
-		expect(await migrateDelaysToStartupTiers(manager)).toBeNull();
-		expect(files).toEqual(after);
+		const data = JSON.parse(LEGACY);
+		await migrateDelaysToStartupTiers(manager, data);
+		const after = JSON.stringify(data);
+		expect(await migrateDelaysToStartupTiers(manager, data)).toBeNull();
+		expect(JSON.stringify(data)).toBe(after);
+		expect(files.size).toBe(2);
 	});
 
 	test("never overwrites an existing backup (keeps the earliest settings)", async () => {
 		const { manager, files } = fakeManager(LEGACY);
-		files.set(`${FOLDER}/${DELAY_SETTINGS_BACKUP_FILE}`, "earlier");
-		await migrateDelaysToStartupTiers(manager);
-		expect(files.get(`${FOLDER}/${DELAY_SETTINGS_BACKUP_FILE}`)).toBe("earlier");
+		files.set(BACKUP, "earlier");
+		await migrateDelaysToStartupTiers(manager, JSON.parse(LEGACY));
+		expect(files.get(BACKUP)).toBe("earlier");
 	});
 
-	test("converts nothing if the backup can't be written", async () => {
+	test("without data.json, backs up the loaded data itself", async () => {
+		const { manager, files } = fakeManager(null);
+		const data = JSON.parse(LEGACY);
+		await migrateDelaysToStartupTiers(manager, data);
+		expect(JSON.parse(files.get(BACKUP)!)).toEqual(JSON.parse(LEGACY));
+	});
+
+	test("if the backup can't be written: works as converted, but keeps the old fields (nothing lost)", async () => {
 		const { manager } = fakeManager(LEGACY, { failWrites: true });
-		const errors: unknown[] = [];
+		const data = JSON.parse(LEGACY);
 		const original = console.error;
-		console.error = (...args: unknown[]) => { errors.push(args); };
+		console.error = () => {};
 		try {
-			expect(await migrateDelaysToStartupTiers(manager)).toBeNull();
+			expect(await migrateDelaysToStartupTiers(manager, data)).toMatchObject({ status: "backup-failed" });
 		} finally {
 			console.error = original;
 		}
-		expect(errors).toHaveLength(1);
-		expect(manager.settings.DELAY).toBe(true);
-		expect(manager.settings.Plugins).toEqual([{ id: "a", enabled: true, delay: "default" }]);
+		// Staged startup stays on, so delay-mode plugins (not on Obsidian's list) aren't taken as switched off.
+		expect(data.STAGED_STARTUP).toBe(true);
+		expect(data.Plugins[0]).toEqual({ id: "a", enabled: true, delay: "default", startupTier: "after-ready" });
+		expect(data.DELAYS).toEqual(JSON.parse(LEGACY).DELAYS);
+		// ...and the next load, with a backup, finishes the job with the same result.
+		const retry = fakeManager(JSON.stringify(data));
+		await migrateDelaysToStartupTiers(retry.manager, data);
+		expect(data.Plugins[0]).toEqual({ id: "a", enabled: true, startupTier: "after-ready" });
+		expect(data).not.toHaveProperty("DELAY");
+	});
+
+	test("a saved STAGED_STARTUP wins over a stale DELAY (written back by an older BPM elsewhere)", async () => {
+		const stale = JSON.stringify({ DELAY: false, STAGED_STARTUP: true, Plugins: [{ id: "a", enabled: true, startupTier: "background", delay: "" }] });
+		const { manager } = fakeManager(stale);
+		const data = JSON.parse(stale);
+		await migrateDelaysToStartupTiers(manager, data);
+		expect(data.STAGED_STARTUP).toBe(true);
+		expect(data.Plugins[0].startupTier).toBe("background");
 	});
 });

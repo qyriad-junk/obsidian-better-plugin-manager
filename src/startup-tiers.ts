@@ -32,16 +32,17 @@ export function tierForLegacyDelay(seconds: number | undefined): StartupTier {
 	return seconds >= LEGACY_BACKGROUND_DELAY_SECONDS ? "background" : "after-ready";
 }
 
-/** A delay preset from before startup tiers (`settings.DELAYS`). */
+/** A delay preset from before startup tiers (`settings.DELAYS`), as found in old data; `time` is unchecked. */
 export interface LegacyDelayPreset {
 	id: string;
 	name?: string;
-	time: number;
+	time?: unknown;
 }
 
 /** The tier for a plugin record whose old `delay` field named one of `presets` ("" or unknown: no delay). */
 export function tierForLegacyDelayPreset(delayId: string | undefined, presets: readonly LegacyDelayPreset[] | undefined): StartupTier {
-	return tierForLegacyDelay(presets?.find((preset) => preset.id === delayId)?.time);
+	const time = presets?.find((preset) => preset.id === delayId)?.time;
+	return tierForLegacyDelay(typeof time === "number" ? time : undefined);
 }
 
 /** The settings keys that startup tiers replaced. */
@@ -61,25 +62,40 @@ export function hasLegacyDelaySettings(settings: LooseSettings): boolean {
 }
 
 /**
- * Convert settings from delay presets to startup tiers, in place: `DELAY` becomes `STAGED_STARTUP`, each record's
- * `delay` (a preset id) becomes a `startupTier` via {@link tierForLegacyDelay}, and the preset list and delay filters
- * are dropped. Records that already have a tier keep it. Returns whether anything changed.
+ * Convert BPM's saved settings (data.json as loaded, before defaults are filled in) from delay presets to startup
+ * tiers, in place: each record's `delay` (a preset id) becomes a `startupTier` via {@link tierForLegacyDelayPreset},
+ * and `DELAY` becomes `STAGED_STARTUP` unless that was saved too (an older BPM on another device writes its own
+ * `DELAY: false` back next to it). Records that already have a tier keep it.
+ *
+ * The old fields are then dropped, unless `keepLegacyFields` (no backup yet): the settings work as converted, and
+ * converting again later gives the same result. Returns whether there was anything to convert.
  */
-export function migrateLegacyDelaySettings(settings: LooseSettings): boolean {
+export function migrateLegacyDelaySettings(settings: LooseSettings, { keepLegacyFields = false } = {}): boolean {
 	if (!hasLegacyDelaySettings(settings)) return false;
 	const presets = Array.isArray(settings.DELAYS)
 		? settings.DELAYS.filter((preset): preset is LegacyDelayPreset => Boolean(preset) && typeof preset === "object"
 			&& typeof (preset as LegacyDelayPreset).id === "string")
 		: [];
-	if ("DELAY" in settings) settings.STAGED_STARTUP = Boolean(settings.DELAY);
+	if ("DELAY" in settings && !("STAGED_STARTUP" in settings)) settings.STAGED_STARTUP = Boolean(settings.DELAY);
 	for (const record of legacyRecords(settings)) {
 		if (!isStartupTier(record.startupTier)) {
 			record.startupTier = tierForLegacyDelayPreset(typeof record.delay === "string" ? record.delay : undefined, presets);
 		}
-		delete record.delay;
+		if (!keepLegacyFields) delete record.delay;
 	}
-	for (const key of LEGACY_DELAY_KEYS) delete settings[key];
+	if (!keepLegacyFields) for (const key of LEGACY_DELAY_KEYS) delete settings[key];
 	return true;
+}
+
+/** Give every record a valid startup tier (hand-edited or otherwise odd data.json): the default where it has none. */
+export function normalizeStartupTiers(records: readonly { startupTier?: unknown }[]): boolean {
+	let changed = false;
+	for (const record of records) {
+		if (isStartupTier(record.startupTier)) continue;
+		record.startupTier = DEFAULT_STARTUP_TIER;
+		changed = true;
+	}
+	return changed;
 }
 
 /** Translation keys (src/lang) for each tier's name. */
