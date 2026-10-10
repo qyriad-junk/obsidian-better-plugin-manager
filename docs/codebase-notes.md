@@ -125,19 +125,27 @@ touches `app.plugins.enabledPlugins` (except the dead developer-mode buttons rel
 | Concept | Meaning | Lives in |
 |---|---|---|
 | **wanted** | the user wants it running | `ManagerPlugin.enabled`, the source of truth in both modes (for `bpm-ignore` plugins: the native list) |
-| **native startup list** | what Obsidian loads at launch | `enabledPlugins` + `saveConfig()`; *derived*: BPM itself + ignored plugins as left + (normal mode) every wanted plugin |
+| **native startup list** | what Obsidian loads at launch | `enabledPlugins` + `saveConfig()`; *derived*: BPM itself + ignored plugins as left + every wanted plugin, except (staged startup) those whose tier isn't `native` |
 | **loaded** | running now | `app.plugins.plugins[id]` |
 
 - Staged startup is a *policy* for the native list, not a second model. `setStagedStartup()` only rewrites the list (no reloads).
-- **Native toggles are adopted, not "taken over".** BPM never calls `*AndSave` and notes every load/unload it causes, so
-  on `app.plugins` "changed": added to the native list → wanted; removed from it, or unloaded without BPM → not wanted.
+- **Native toggles are adopted, not "taken over".** BPM never calls `*AndSave`, so on `app.plugins` "changed": added to
+  the native list → wanted; removed from it → not wanted; **unloaded with Obsidian's `_userDisabled` mark** → not wanted.
   At launch, `start()` does the same for the list Obsidian just used. Obsidian's own toggle shows *running* state, so
-  switching off a BPM-started plugin there only unloads it; that's why unloads are tracked too.
+  switching off a BPM-started plugin there only unloads it; that's why unloads are looked at too.
+  - Why the mark and not "unloaded without BPM": `unloadPlugin(id, userDisable)` sets `instance._userDisabled =
+    userDisable`, and only Obsidian's toggle passes true. Reloads (BPM's restart/updates, Obsidian's Update button,
+    hot-reload tools) pass false, and `loadPlugin` reads main.js *before* the instance reappears, so the 0 ms "changed"
+    fires mid-reload. Adopting any unload made BPM's own Restart switch plugins off (found in review, 2026-10-10).
+  - Overlapping `enablePlugin` calls for one id both run the plugin (loadPlugin only sees an instance after the read);
+    `PluginStartup.load` shares an in-flight load.
 - `Manager.saveSettings()` runs `reconcile()` first, so the native list is re-derived on every save.
 - API used by callers: `isWanted/isLoaded/isManaged`, `setWanted(id, on, { userInitiated })`, `setWantedMany`,
   `startOnce` (run without wanting), `restart`, `whileUnloaded(id, fn)` (e.g. writing data.json), `setIgnored`,
-  `applyInstalledFiles(id, { wantedIfNew })` (installs/updates: read manifest, keep on/off, reload if running).
-- `userInitiated: true` mirrors Obsidian's own toggle (`onUserEnable()`; panes closed on disable). Delayed starts,
+  `applyInstalledFiles(id, { wantedIfNew })` (installs/updates: read manifest, keep on/off, reload if running or start if
+  wanted; a refused fresh install isn't recorded as wanted). Every one returns false when Obsidian refuses to load the
+  plugin, and callers say so (notice / import failure list).
+- `userInitiated: true` mirrors Obsidian's own toggle (`onUserEnable()`; panes closed on disable). Staged starts,
   troubleshooting and imports pass false.
 - External `data.json` changes: Obsidian notifies only native-list plugins, so `start()` also subscribes to vault `raw`
   and forwards `onConfigFileChange()` to the running plugins BPM started (see internals table).
@@ -152,18 +160,25 @@ not after N seconds (Qyriad's framing: the delays were only ever a way to get pl
 - Tiers: `native` = on Obsidian's native list (blocks ready). `after-ready` = BPM starts them at layout-ready, one at a
   time in BPM's list order (`settings.Plugins` order), `setTimeout(0)` yield between. `background` = after all
   after-ready ones, one at a time, each after `requestIdleCallback` (1 s timeout). A native-tier plugin that isn't on the
-  native list yet (first launch after converting) is started first at layout-ready. The tier is read when its turn
-  comes. Debug setting on → each start is logged with ms since layout-ready and onload duration.
+  native list yet (first launch after converting) is started first at layout-ready. Each turn takes whichever plugin is
+  first in `pendingStarts()` order *at that moment* (the waits per tier are `TIER_PACING`), so tier changes count until a
+  plugin has started. Refusals are `console.warn`ed; with the debug setting on, each start is logged with ms since
+  layout-ready and onload duration.
 - Outside staged startup every wanted plugin is native, whatever its tier (tiers are kept).
 - Changing a tier: `PluginStartup.setStartupTier(ids, tier)` (edit-mode dropdown, bulk menu, right-click "Startup tier ▸"
   submenu). Only the native list changes; nothing is reloaded.
-- **Conversion from delay presets** (`migrateDelaysToStartupTiers`, src/migrations.ts): runs on every load by *shape*
-  (old keys present), not `MIGRATION_VERSION`. First copies data.json byte-for-byte to
-  `data.before-startup-tiers.json` (once; never overwritten; if that fails, nothing is converted), then maps
-  no delay → native, < 5 s → after-ready, ≥ 5 s → background (agreed 2026-10-08), `DELAY` → `STAGED_STARTUP`, drops
-  `DELAYS`/`FILTER_DELAY*`, saves, and shows a persistent notice naming the backup.
-- After each late start BPM re-applies the saved ribbon layout (`RibbonLayoutKeeper`; see internals), and once more 2 s
-  after the last one, for plugins that add icons after onload.
+- **Conversion from delay presets** (`migrateDelaysToStartupTiers`, called by `loadSettings()` on data.json *as loaded*,
+  before defaults are merged): runs on every load by *shape* (old keys present), not `MIGRATION_VERSION`. First copies
+  data.json byte-for-byte to `data.before-startup-tiers.json` (once; never overwritten), then maps no delay → native,
+  < 5 s → after-ready, ≥ 5 s → background (agreed 2026-10-08), `DELAY` → `STAGED_STARTUP` (unless `STAGED_STARTUP` was
+  saved too: an older BPM elsewhere writes `DELAY: false` back), drops `DELAYS`/`FILTER_DELAY*`; onload saves and shows a
+  persistent notice naming the backup. **If the backup fails**, it converts anyway for the session but keeps the old
+  fields (so nothing is lost, and the next load retries), with a notice. Leaving staged startup off instead would make
+  `start()` take every delay-mode plugin (absent from the native list) as switched off. `loadSettings` then gives any
+  record without a valid tier the default (`normalizeStartupTiers`).
+- Around each late start BPM re-applies the saved ribbon layout (`RibbonLayoutKeeper`; see internals), and once more 2 s
+  after the last one, for plugins that add icons after onload. The keeper's first sync must be at layout-ready (onload
+  registers it before PluginStartup's): a later first sync would revert in-session ribbon changes.
 - Switching staged startup, or BPM being unloaded while it's on (`stop()`): only the native list changes; nothing is
   reloaded. `stop()` hands wanted plugins back to Obsidian and starts any still pending. Obsidian does **not** unload
   plugins on app quit (verified), so `stop()` only runs when BPM itself is disabled, reloaded or updated.
@@ -194,12 +209,12 @@ All undocumented, typed loosely in `src/obsidian-internals.ts` or via `@ts-ignor
 | Internal | Used for | Verified semantics (1.13.7) |
 |---|---|---|
 | `app.plugins.manifests` | list installed plugins | populated by `loadManifests()`; **not** auto-refreshed when files appear on disk |
-| `app.plugins.enabledPlugins: Set` | "enabled" in normal mode | the **persisted** startup set, mirror of `community-plugins.json`; *not* "currently loaded" |
+| `app.plugins.enabledPlugins: Set` | the derived native startup list | the **persisted** startup set, mirror of `community-plugins.json`; *not* "currently loaded" |
 | `app.plugins.plugins[id]` | detect loaded instance | the actually-loaded plugin objects |
-| `enablePlugin(id, userEnable?)` | staged start, single start | returns `Promise<boolean>` (BPM types it `void`). Returns `false` if `manifests[id]` is missing, restricted mode, deprecated/blocklisted, or desktop-only on mobile. Doesn't touch `enabledPlugins`. Idempotent (`loadPlugin` returns the existing instance). |
-| `disablePlugin(id)` | | unload only |
-| `enablePluginAndSave` / `disablePluginAndSave` | normal-mode toggles | `enablePlugin(id,true)` then `enabledPlugins.add` + `requestSaveConfig()` (debounced 1 s) / `enabledPlugins.delete` + `requestSaveConfig()` + `disablePlugin(id,true)` |
-| `saveConfig()` | (not used by BPM) | writes `Array.from(enabledPlugins)` to `community-plugins.json` |
+| `enablePlugin(id, userEnable?)` | staged start, single start | returns `Promise<boolean>`. Returns `false` if `manifests[id]` is missing, restricted mode, deprecated/blocklisted, or desktop-only on mobile. Doesn't touch `enabledPlugins`. Idempotent (`loadPlugin` returns the existing instance). |
+| `disablePlugin(id, userDisable?)` | | unload only; `unloadPlugin` sets `instance._userDisabled = userDisable` (true only from Obsidian's own toggle), then `didChange()` |
+| `enablePluginAndSave` / `disablePluginAndSave` | (not used by BPM; Obsidian's own toggle) | `enablePlugin(id,true)` then `enabledPlugins.add` + `requestSaveConfig()` (debounced 1 s) / `enabledPlugins.delete` + `requestSaveConfig()` + `disablePlugin(id,true)` |
+| `saveConfig()` | `PluginStartup` (native list) | writes `Array.from(enabledPlugins)` to `community-plugins.json` |
 | vault `raw` → `plugins.onRaw` | `PluginStartup` forwards for BPM-started plugins | **never re-reads `community-plugins.json`**; only calls `plugin.onConfigFileChange()` for `<pluginFolder>/<id>/data.json` changes, and only if `enabledPlugins.has(id)`. `onConfigFileChange` = 50 ms debounce → stat `data.json`, and if mtime > `_lastDataModifiedTime` (set by `loadData`/`saveData`) call the public `onExternalSettingsChange()` (API ≥ 1.5.7) and `settingTab.update()`. Raw events come from the adapter's watcher (desktop: `watchHiddenRecursive` covers the config dir); generic, not Sync-specific. Hotkeys, snippets and property types reload through the same path. |
 | `installPlugin(repo, version, manifest)`, `uninstallPlugin`, `loadManifests` | protocol install, delete | |
 | `app.setting.open/openTabById/activeTab` | open plugin settings / hotkeys tab | |
@@ -336,10 +351,21 @@ coming back [R] · delay timers starting mid-startup and same-delay plugins firi
 one at a time) · sub-second delays not settable (moot: no seconds any more) · startup tier settable only in edit/bulk
 mode (now also the right-click menu, without losing scroll).
 
+Found by the branch review (2026-10-10), fixed: **BPM's own Restart, updates, and Obsidian's Update button switching
+plugins off** (adoption race, [R], since step 1) · a tier change during a staged startup stranding the plugin · a failed
+backup or a stale synced `DELAY` turning every delay-mode plugin off · the ribbon keeper's late first sync reverting
+in-session changes [R] · refused loads going unreported (commands, bulk, import, protocol install) · overlapping loads
+running a plugin twice.
+
 ### Correctness (open)
 7. [C][R] Entering edit mode re-renders the whole plugin page (`renderContent()` → `pageEl.empty()`), losing scroll
    (Qyriad confirmed on the branch, 2026-10-10); edit-mode cards have no enable toggle; the context menu has no
    enable/disable action. (Startup tier is in the context menu now.)
+
+- [C] Troubleshooting ignores which plugins `setWantedMany` couldn't start, so a plugin Obsidian refuses counts as
+  "on" in the current half and the bisection can blame the wrong one (review, 2026-10-10).
+- [C] A plugin whose `onload` threw stays in `app.plugins.plugins` (Obsidian's loadPlugin adds it first), so BPM and
+  Obsidian's own toggle both treat it as running. Same as native Obsidian; not addressed.
 
 ### Security / trust (open)
 - [C] `obsidian://BPM-plugin-install?id=<community id>&enable=true` installs **and enables** a plugin with no
