@@ -530,3 +530,77 @@ describe("setStartupTier", () => {
 		expect(vault.native()).toEqual([BPM]);
 	});
 });
+
+describe("unloads BPM didn't cause and the user didn't make (reloads, updates)", () => {
+	/** Real loads read main.js before the plugin shows up, so Obsidian's 0 ms "changed" fires in between. */
+	const realisticVault = (ids: string[], options?: { newRecordTier?: StartupTier }) => {
+		const vault = new Vault(ids, options);
+		vault.plugins.loadDelayMs = 5;
+		return vault;
+	};
+	/** Await something that waits on the fake clock (a load's main.js read). */
+	const run = async <T>(promise: Promise<T>): Promise<T> => {
+		await advance(50);
+		return promise;
+	};
+
+	test("BPM's own restart keeps the plugin wanted and on the native list", async () => {
+		const vault = realisticVault(["a"]);
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await run(vault.launch());
+		expect(await run(vault.startup.restart("a"))).toBe(true);
+		await settle();
+		expect(vault.startup.isWanted("a")).toBe(true);
+		expect(vault.native()).toEqual([BPM, "a"].sort());
+	});
+
+	test("updating a running plugin keeps it wanted", async () => {
+		const vault = realisticVault(["a"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await run(vault.launch());
+		await run(vault.startup.applyInstalledFiles("a"));
+		await settle();
+		expect(vault.startup.isWanted("a")).toBe(true);
+	});
+
+	test("Obsidian's own updater (disablePlugin, then enablePlugin(id, true)) isn't taken as switching it off", async () => {
+		const vault = realisticVault(["a"]);
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await run(vault.launch());
+		await vault.plugins.disablePlugin("a");
+		await run(vault.plugins.enablePlugin("a", true));
+		await settle();
+		expect(vault.startup.isWanted("a")).toBe(true);
+		expect(vault.native()).toEqual([BPM, "a"].sort());
+	});
+
+	test("Obsidian's own toggle switching off a BPM-started plugin is still adopted", async () => {
+		const vault = realisticVault(["a"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a"];
+		await run(vault.launch());
+		await run(vault.launch());
+		expect(vault.plugins.loaded()).toEqual([BPM, "a"].sort());
+		await vault.plugins.disablePluginAndSave("a");
+		await settle();
+		expect(vault.startup.isWanted("a")).toBe(false);
+	});
+
+	test("a plugin is never loaded twice by overlapping starts", async () => {
+		const vault = realisticVault(["a", "b"], { newRecordTier: "after-ready" });
+		vault.settings.STAGED_STARTUP = true;
+		vault.plugins.communityPluginsOnDisk = [BPM, "a", "b"];
+		await run(vault.launch());
+		await run(vault.launch({ untilLayoutReady: false }));
+		vault.plugins.log = [];
+		vault.finishLayout();
+		await vi.advanceTimersToNextTimerAsync(); // the staged start of a is now reading main.js
+		const started = vault.startup.startOnce("a");
+		const off = vault.startup.setStagedStartup(false); // starts what's pending, i.e. b
+		await advance(100);
+		await started;
+		await off;
+		expect(vault.plugins.log.filter((entry) => entry.startsWith("load:"))).toEqual(["load:a", "load:b"]);
+	});
+});

@@ -76,8 +76,13 @@ export class PluginStartup {
 	private knownNativeList = new Set<string>();
 	/** Plugins tagged bpm-ignore as of the last reconcile, to notice the tag being added or removed anywhere. */
 	private knownIgnored = new Set<string>();
-	/** What's running as far as BPM knows (it updates this *before* each load/unload it causes). */
-	private knownLoaded = new Set<string>();
+	/**
+	 * The running plugin instances as of the last look. When one disappears it was unloaded, and Obsidian's
+	 * unloadPlugin records on the instance whether the user switched it off (`_userDisabled`).
+	 */
+	private knownInstances = new Map<string, unknown>();
+	/** Loads BPM has in flight, so a second request for the same plugin waits for the first instead of loading it twice. */
+	private loading = new Map<string, Promise<boolean>>();
 	private changeRef: EventRef | null = null;
 	private stopWatchingRaw: (() => void) | null = null;
 	/** Plugins BPM will start once the workspace is ready (staged startup), and hasn't yet. */
@@ -188,16 +193,20 @@ export class PluginStartup {
 	 * Adopt changes BPM didn't make: the user toggled a plugin in Obsidian's own settings (or the CLI). Called on
 	 * every `app.plugins` "changed" event.
 	 *
-	 * - Added to the native list: wanted. (In staged-startup mode, the next reconcile hands it back to BPM; it keeps running,
-	 *   so Obsidian's toggle, which shows running state, doesn't flip back.)
-	 * - Removed from the native list, or unloaded without BPM doing it: not wanted.
+	 * - Added to the native list: wanted. (In staged-startup mode the next reconcile takes it off the list again unless
+	 *   its tier is `native`, and BPM starts it from then on; it keeps running, so Obsidian's toggle, which shows running
+	 *   state, doesn't flip back.)
+	 * - Removed from the native list: not wanted.
+	 * - Unloaded by the user (Obsidian's own toggle, which marks the instance `_userDisabled`): not wanted. This is how
+	 *   switching off a plugin BPM started looks, since it isn't on the native list. Other unloads are reloads (BPM's
+	 *   restart, Obsidian's or BPM's updater, hot-reload tools) or BPM's own bookkeeping, and say nothing about intent.
 	 *
-	 * Loads BPM didn't cause aren't adopted on their own: native enables also add to the native list, and anything
-	 * else (another plugin starting one) isn't a statement of intent.
+	 * Loads aren't adopted on their own: native enables also add to the native list, and anything else (another plugin
+	 * starting one) isn't a statement of intent.
 	 */
 	adoptExternalChanges(): boolean {
 		const native = new Set(this.registry.enabledPlugins);
-		const loaded = new Set(Object.keys(this.registry.plugins ?? {}));
+		const instances = new Map<string, unknown>(Object.entries(this.registry.plugins ?? {}));
 		const external = (id: string) => id !== this.host.selfId && !this.isIgnored(id);
 		let changed = false;
 		for (const id of native) {
@@ -206,28 +215,46 @@ export class PluginStartup {
 		for (const id of this.knownNativeList) {
 			if (!native.has(id) && external(id)) changed = this.setRecordWanted(id, false) || changed;
 		}
-		for (const id of this.knownLoaded) {
-			if (!loaded.has(id) && external(id)) changed = this.setRecordWanted(id, false) || changed;
+		for (const [id, instance] of this.knownInstances) {
+			if (instances.has(id) || !external(id) || !wasUserDisabled(instance)) continue;
+			changed = this.setRecordWanted(id, false) || changed;
 		}
 		this.knownNativeList = native;
-		this.knownLoaded = loaded;
+		this.knownInstances = instances;
 		return changed;
 	}
 
-	/** Load a plugin, noting that BPM caused it. */
-	private async load(id: string, userInitiated: boolean): Promise<boolean> {
-		this.knownLoaded.add(id);
-		this.host.syncLateStartLayout();
-		const ok = await this.registry.enablePlugin(id, userInitiated);
-		if (!ok && !this.isLoaded(id)) this.knownLoaded.delete(id);
-		this.host.syncLateStartLayout();
-		return ok;
+	/**
+	 * Load a plugin. If BPM is already loading it, wait for that instead: Obsidian's loadPlugin only notices an existing
+	 * instance once it's done reading main.js, so two overlapping loads would run the plugin twice.
+	 */
+	private load(id: string, userInitiated: boolean): Promise<boolean> {
+		const inFlight = this.loading.get(id);
+		if (inFlight) return inFlight;
+		const loading = (async () => {
+			this.syncLateStartLayout();
+			try {
+				return await this.registry.enablePlugin(id, userInitiated);
+			} finally {
+				this.loading.delete(id);
+				this.syncLateStartLayout();
+			}
+		})();
+		this.loading.set(id, loading);
+		return loading;
 	}
 
-	/** Unload a plugin, noting that BPM caused it. */
 	private async unload(id: string, userInitiated: boolean): Promise<void> {
-		this.knownLoaded.delete(id);
 		await this.registry.disablePlugin(id, userInitiated);
+	}
+
+	/** Re-apply the saved ribbon layout around a load. Cosmetic: a failure must not stop the plugin from starting. */
+	private syncLateStartLayout(): void {
+		try {
+			this.host.syncLateStartLayout();
+		} catch (error) {
+			console.error("[BPM] Couldn't re-apply the saved ribbon layout", error);
+		}
 	}
 
 	/**
@@ -305,7 +332,7 @@ export class PluginStartup {
 	 */
 	async start(): Promise<void> {
 		this.knownIgnored = this.currentlyIgnored();
-		this.knownLoaded = new Set(Object.keys(this.registry.plugins ?? {}));
+		this.knownInstances = new Map(Object.entries(this.registry.plugins ?? {}));
 		let recordsChanged = false;
 		for (const id of Object.keys(this.registry.manifests)) {
 			if (!this.isManaged(id)) continue;
@@ -379,7 +406,7 @@ export class PluginStartup {
 			}
 		}
 		// Some plugins add their ribbon icons a little after onload (e.g. from onLayoutReady): catch those too.
-		if (startedAny) window.setTimeout(() => { if (stillRunning()) this.host.syncLateStartLayout(); }, 2000);
+		if (startedAny) window.setTimeout(() => { if (stillRunning()) this.syncLateStartLayout(); }, 2000);
 	}
 
 	private cancelScheduledStart(id: string): void {
@@ -498,10 +525,11 @@ export class PluginStartup {
 	async setStagedStartup(enabled: boolean): Promise<void> {
 		this.host.settings.STAGED_STARTUP = enabled;
 		if (!enabled) {
+			// Take them all off the queue first, so a staged startup still running doesn't start any of them as well.
 			const pending = this.pendingStarts();
+			for (const id of pending) this.cancelScheduledStart(id);
 			for (const id of pending) {
-				this.cancelScheduledStart(id);
-				if (this.isWanted(id)) await this.load(id, false);
+				if (this.isWanted(id) && !this.isLoaded(id)) await this.load(id, false);
 			}
 		}
 		await this.syncNativeStartupList();
@@ -579,4 +607,9 @@ function waitForIdle(): Promise<void> {
 		if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(() => resolve(), { timeout: 1000 });
 		else window.setTimeout(resolve, 50);
 	});
+}
+
+/** Whether Obsidian unloaded this plugin instance because the user switched it off (unloadPlugin's `userDisable`). */
+function wasUserDisabled(instance: unknown): boolean {
+	return Boolean(instance) && typeof instance === "object" && (instance as { _userDisabled?: unknown })._userDisabled === true;
 }

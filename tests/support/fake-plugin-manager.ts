@@ -7,6 +7,8 @@ export interface FakePluginInstance {
 	/** How many times onConfigFileChange() was called (Obsidian's "your data.json changed on disk" hook). */
 	configFileChanges: number;
 	onConfigFileChange(): void;
+	/** Set by unloadPlugin(id, userDisable), like Obsidian: true only when the user switched it off. */
+	_userDisabled: boolean;
 }
 
 /**
@@ -15,7 +17,11 @@ export interface FakePluginInstance {
  * Mirrors the semantics verified against Obsidian 1.13.7's app.js (see docs/codebase-notes.md, "Obsidian internals"):
  * - `enabledPlugins` is the *persisted startup list*, not "what's running"; `plugins` is what's running.
  * - `enablePlugin` / `disablePlugin` only load/unload. `enablePlugin` returns false if the manifest isn't known
- *   (i.e. files written but `loadManifests()` not called yet), and is idempotent for loaded plugins.
+ *   (i.e. files written but `loadManifests()` not called yet) or Obsidian refuses the plugin (`refused`), and returns
+ *   the existing instance for loaded plugins. Like Obsidian's loadPlugin, it reads main.js before the instance appears
+ *   in `plugins` (`loadDelayMs`, 0 = no gap), and two overlapping calls for the same id both load it.
+ * - `disablePlugin(id, userDisable)` records `userDisable` on the instance as `_userDisabled` (Obsidian's own toggle
+ *   passes true; its updater and other reloaders don't).
  * - `*AndSave` change `enabledPlugins` and save it; `saveConfig()` writes `Array.from(enabledPlugins)`.
  * - `enabledPlugins` is never re-read from disk at runtime; only `startup()` (Obsidian launching) reads it.
  * - `didChange()` triggers "changed" asynchronously (Obsidian debounces it with a 0 ms timeout).
@@ -35,6 +41,12 @@ export class FakePluginManager {
 	communityPluginsOnDisk: string[] = [];
 	/** Everything that happened, in order: "load:<id>", "unload:<id>", "save". */
 	log: string[] = [];
+	/** Plugins Obsidian refuses to load (restricted mode, blocklisted, desktop-only on mobile, onload threw…). */
+	refused = new Set<string>();
+	/** Time (fake clock) between reading main.js and the instance appearing in `plugins`. 0: none. */
+	loadDelayMs = 0;
+	/** Instances that were unloaded, by id (the latest one), to inspect `_userDisabled`. */
+	unloaded: Record<string, FakePluginInstance> = {};
 
 	private changeTimer: ReturnType<typeof setTimeout> | null = null;
 	private listeners = new Set<() => void>();
@@ -75,17 +87,24 @@ export class FakePluginManager {
 	}
 
 	async enablePlugin(id: string, userEnable = false): Promise<boolean> {
-		if (!this.manifests[id]) return false;
+		if (!this.manifests[id] || this.refused.has(id)) return false;
 		if (!this.plugins[id]) {
-			this.plugins[id] = { id, userEnabled: userEnable, configFileChanges: 0, onConfigFileChange() { this.configFileChanges++; } };
+			if (this.loadDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.loadDelayMs));
+			this.plugins[id] = {
+				id, userEnabled: userEnable, configFileChanges: 0, _userDisabled: false,
+				onConfigFileChange() { this.configFileChanges++; },
+			};
 			this.log.push(`load:${id}`);
 		}
 		this.didChange();
 		return true;
 	}
 
-	async disablePlugin(id: string, _userDisable = false): Promise<void> {
-		if (this.plugins[id]) {
+	async disablePlugin(id: string, userDisable = false): Promise<void> {
+		const instance = this.plugins[id];
+		if (instance) {
+			instance._userDisabled = userDisable;
+			this.unloaded[id] = instance;
 			delete this.plugins[id];
 			this.log.push(`unload:${id}`);
 		}
